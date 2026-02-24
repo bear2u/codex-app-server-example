@@ -6,9 +6,14 @@ Monorepo with:
 - `codex-app-server`: Fastify BFF that bridges to `codex app-server` over stdio JSON-RPC
 - `packages/shared-contracts`: shared API/SSE contracts
 
+## Preview
+
+![Codex Chat UI Preview](./image.png)
+
 Study guide:
 
 - [MONOREPO_WORKFLOW.md](./MONOREPO_WORKFLOW.md): how root-level monorepo development and dual-server runtime work
+- [WEB_UI_ENHANCEMENT_CHECKLIST.md](./WEB_UI_ENHANCEMENT_CHECKLIST.md): prioritized checklist for web-ui hardening/improvements
 
 ## Requirements
 
