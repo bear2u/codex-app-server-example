@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useReducer, useState } from "react";
-import type { CommandApprovalDecision, FileApprovalDecision } from "@codex-app/shared-contracts";
+import type { CommandApprovalDecision, FileApprovalDecision, TurnInputItem } from "@codex-app/shared-contracts";
 import {
   approveCommand,
   approveFileChange,
@@ -17,8 +17,18 @@ import { chatReducer, initialChatState } from "@/lib/event-reducer";
 import { connectUiEventStream } from "@/lib/sse-client";
 import { ApprovalBanner } from "./approval-banner";
 import { MessageList } from "./message-list";
-import { PromptComposer } from "./prompt-composer";
+import { PromptComposer, type PromptComposerImageAttachment } from "./prompt-composer";
 import { ThreadSidebar } from "./thread-sidebar";
+
+const THREAD_LIST_LIMIT = 10;
+const WORKSPACE_BY_THREAD_STORAGE_KEY = "codex.workspaceByThreadId";
+const NEW_THREAD_WORKSPACE_STORAGE_KEY = "codex.newThreadWorkspaceDraft";
+const HEADER_COLLAPSED_STORAGE_KEY = "codex.headerCollapsed";
+
+function normalizeCwd(value: string): string | undefined {
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
 
 export function ChatShell() {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
@@ -33,13 +43,73 @@ export function ChatShell() {
   const [loadingThreadHistoryId, setLoadingThreadHistoryId] = useState<string | null>(null);
   const [loadingMoreHistoryThreadId, setLoadingMoreHistoryThreadId] = useState<string | null>(null);
   const [threadCopyStatus, setThreadCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [workspaceCopyStatus, setWorkspaceCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const [workspaceSaveStatus, setWorkspaceSaveStatus] = useState<"idle" | "saved">("idle");
+  const [workspaceByThreadId, setWorkspaceByThreadId] = useState<Record<string, string>>({});
+  const [newThreadWorkspaceDraft, setNewThreadWorkspaceDraft] = useState("");
+  const [currentWorkspaceDraft, setCurrentWorkspaceDraft] = useState("");
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const savedMapRaw = window.localStorage.getItem(WORKSPACE_BY_THREAD_STORAGE_KEY);
+      if (savedMapRaw) {
+        const parsed = JSON.parse(savedMapRaw) as Record<string, unknown>;
+        const restored: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value === "string") {
+            restored[key] = value;
+          }
+        }
+        setWorkspaceByThreadId(restored);
+      }
+
+      const savedDraft = window.localStorage.getItem(NEW_THREAD_WORKSPACE_STORAGE_KEY);
+      if (savedDraft) {
+        setNewThreadWorkspaceDraft(savedDraft);
+      }
+
+      const savedHeaderCollapsed = window.localStorage.getItem(HEADER_COLLAPSED_STORAGE_KEY);
+      if (savedHeaderCollapsed === "1") {
+        setIsHeaderCollapsed(true);
+      }
+    } catch {
+      // Ignore storage parse issues; user can re-enter workspace paths.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(WORKSPACE_BY_THREAD_STORAGE_KEY, JSON.stringify(workspaceByThreadId));
+  }, [workspaceByThreadId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(NEW_THREAD_WORKSPACE_STORAGE_KEY, newThreadWorkspaceDraft);
+  }, [newThreadWorkspaceDraft]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(HEADER_COLLAPSED_STORAGE_KEY, isHeaderCollapsed ? "1" : "0");
+  }, [isHeaderCollapsed]);
 
   useEffect(() => {
     let mounted = true;
 
     const bootstrap = async () => {
       try {
-        const [auth, threads] = await Promise.all([readAuthState(), listThreads()]);
+        const [auth, threads] = await Promise.all([readAuthState(), listThreads({ limit: THREAD_LIST_LIMIT })]);
 
         if (!mounted) {
           return;
@@ -114,11 +184,31 @@ export function ChatShell() {
   const currentThreadId = state.currentThreadId;
   const currentMessages = currentThreadId ? (state.messagesByThreadId[currentThreadId] ?? []) : [];
   const currentHistoryNextCursor = currentThreadId ? (state.historyNextCursorByThreadId[currentThreadId] ?? null) : null;
+  const currentThreadWorkspace = currentThreadId ? (workspaceByThreadId[currentThreadId] ?? "") : "";
   const hasMoreHistory = Boolean(currentHistoryNextCursor);
   const loadingMoreHistory = !!currentThreadId && loadingMoreHistoryThreadId === currentThreadId;
+  const normalizedWorkspaceDraft = normalizeCwd(currentWorkspaceDraft) ?? "";
+  const normalizedCurrentWorkspace = normalizeCwd(currentThreadWorkspace) ?? "";
+  const hasWorkspaceChanges = normalizedWorkspaceDraft !== normalizedCurrentWorkspace;
 
   const toolStatuses = useMemo(() => Object.values(state.toolStatusesByItemId), [state.toolStatusesByItemId]);
   const isThinking = sending || isAwaitingAssistant || !!state.activeTurnId;
+
+  const resolveThreadCwd = (threadId: string | null): string | undefined => {
+    if (!threadId) {
+      return normalizeCwd(newThreadWorkspaceDraft);
+    }
+    return normalizeCwd(workspaceByThreadId[threadId] ?? "");
+  };
+
+  const handleNewThreadWorkspacePathChange = (value: string) => {
+    setNewThreadWorkspaceDraft(value);
+  };
+
+  useEffect(() => {
+    setCurrentWorkspaceDraft(currentThreadWorkspace);
+    setWorkspaceSaveStatus("idle");
+  }, [currentThreadId, currentThreadWorkspace]);
 
   const ensureThread = async (): Promise<string> => {
     if (state.currentThreadId) {
@@ -130,7 +220,14 @@ export function ChatShell() {
       }
     }
 
-    const created = await createThread();
+    const threadCwd = resolveThreadCwd(null);
+    const created = await createThread(threadCwd ? { cwd: threadCwd } : {});
+    if (threadCwd) {
+      setWorkspaceByThreadId((prev) => ({
+        ...prev,
+        [created.threadId]: threadCwd,
+      }));
+    }
     dispatch({ type: "select-thread", threadId: created.threadId });
     dispatch({
       type: "replace-thread-history-page",
@@ -144,7 +241,14 @@ export function ChatShell() {
   const handleCreateThread = async () => {
     try {
       setError(null);
-      const created = await createThread();
+      const threadCwd = normalizeCwd(newThreadWorkspaceDraft);
+      const created = await createThread(threadCwd ? { cwd: threadCwd } : {});
+      if (threadCwd) {
+        setWorkspaceByThreadId((prev) => ({
+          ...prev,
+          [created.threadId]: threadCwd,
+        }));
+      }
       dispatch({ type: "select-thread", threadId: created.threadId });
       dispatch({
         type: "replace-thread-history-page",
@@ -209,21 +313,50 @@ export function ChatShell() {
     }
   };
 
-  const handleSend = async (text: string) => {
+  const handleSend = async ({
+    text,
+    attachments,
+  }: {
+    text: string;
+    attachments: PromptComposerImageAttachment[];
+  }) => {
     setError(null);
     setSending(true);
     setIsAwaitingAssistant(true);
 
     try {
-      const threadId = await ensureThread();
-      dispatch({ type: "append-user-message", threadId, text });
+      const normalizedText = text.trim();
+      const input: TurnInputItem[] = [];
+      if (normalizedText) {
+        input.push({ type: "text", text: normalizedText });
+      }
+      if (attachments.length) {
+        input.push(...attachments.map((attachment) => ({ type: "image" as const, url: attachment.url })));
+      }
+      if (!input.length) {
+        setIsAwaitingAssistant(false);
+        return;
+      }
 
-      await startTurn(threadId, {
-        input: [{ type: "text", text }],
+      const threadId = await ensureThread();
+      dispatch({
+        type: "append-user-message",
+        threadId,
+        text: normalizedText,
+        attachments: attachments.map((attachment) => ({ type: "image", url: attachment.url })),
       });
+
+      const threadCwd = resolveThreadCwd(threadId);
+      const started = await startTurn(threadId, {
+        input,
+        cwd: threadCwd,
+      });
+      // Keep interrupt state usable even if turn/started SSE arrives late or is briefly missed.
+      dispatch({ type: "set-active-turn", threadId, turnId: started.turnId });
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "Failed to start turn");
       setIsAwaitingAssistant(false);
+      dispatch({ type: "clear-active-turn" });
     } finally {
       setSending(false);
     }
@@ -236,9 +369,10 @@ export function ChatShell() {
 
     try {
       await interruptTurn(state.currentThreadId, state.activeTurnId);
+      dispatch({ type: "clear-active-turn" });
       setIsAwaitingAssistant(false);
     } catch (interruptError) {
-      setError(interruptError instanceof Error ? interruptError.message : "Failed to interrupt turn");
+      setError(interruptError instanceof Error ? interruptError.message : "Failed to stop turn");
     }
   };
 
@@ -277,72 +411,238 @@ export function ChatShell() {
     }, 1800);
   };
 
-  return (
-    <main className="h-screen w-screen bg-[radial-gradient(circle_at_top_right,var(--sky-soft),transparent_40%),radial-gradient(circle_at_bottom_left,var(--teal-soft),transparent_35%),var(--background)] p-4 text-[var(--foreground)]">
-      <div className="mx-auto flex h-full max-w-[1440px] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--background)] shadow-xl">
-        <ThreadSidebar
-          threads={state.threads}
-          currentThreadId={state.currentThreadId}
-          onSelectThread={(threadId) => {
-            void handleSelectThread(threadId);
-          }}
-          onCreateThread={() => {
-            void handleCreateThread();
-          }}
-        />
+  const handleCopyWorkspacePath = async () => {
+    const workspace = normalizeCwd(currentWorkspaceDraft);
+    if (!workspace) {
+      return;
+    }
 
-        <section className="flex flex-1 flex-col p-4 md:p-6">
-          <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">Codex Chat Console</h1>
-              <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-                Auth: <span className="font-semibold">{state.authMode ?? "not authenticated"}</span>
-              </p>
-              {currentThreadId ? (
-                <div className="mt-2 inline-flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-2 py-1">
-                  <span className="text-xs text-[var(--muted-foreground)]">Thread ID</span>
-                  <code className="text-xs font-semibold text-[var(--foreground)]">{currentThreadId}</code>
+    try {
+      await navigator.clipboard.writeText(workspace);
+      setWorkspaceCopyStatus("copied");
+    } catch {
+      setWorkspaceCopyStatus("failed");
+    }
+
+    setTimeout(() => {
+      setWorkspaceCopyStatus("idle");
+    }, 1800);
+  };
+
+  const handleCurrentThreadWorkspaceChange = (value: string) => {
+    setCurrentWorkspaceDraft(value);
+    setWorkspaceSaveStatus("idle");
+  };
+
+  const handleSaveCurrentThreadWorkspace = () => {
+    if (!currentThreadId) {
+      return;
+    }
+
+    const normalized = normalizeCwd(currentWorkspaceDraft);
+    setWorkspaceByThreadId((prev) => {
+      const next = { ...prev };
+      if (!normalized) {
+        delete next[currentThreadId];
+      } else {
+        next[currentThreadId] = normalized;
+      }
+      return next;
+    });
+
+    setCurrentWorkspaceDraft(normalized ?? "");
+    setWorkspaceSaveStatus("saved");
+    setTimeout(() => {
+      setWorkspaceSaveStatus("idle");
+    }, 1800);
+  };
+
+  return (
+    <main className="min-h-dvh w-full bg-[radial-gradient(circle_at_top_right,var(--sky-soft),transparent_40%),radial-gradient(circle_at_bottom_left,var(--teal-soft),transparent_35%),var(--background)] p-2 text-[var(--foreground)] sm:p-4">
+      <div className="mx-auto flex h-[calc(100dvh-1rem)] max-w-[1440px] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--background)] shadow-xl sm:h-[calc(100dvh-2rem)]">
+        <div
+          aria-hidden={!isSidebarOpen}
+          onClick={() => setIsSidebarOpen(false)}
+          className={`fixed inset-0 z-40 bg-slate-900/35 transition-opacity duration-200 md:hidden ${
+            isSidebarOpen ? "opacity-100" : "pointer-events-none opacity-0"
+          }`}
+        />
+        <div
+          className={`fixed inset-y-0 left-0 z-50 w-[min(86vw,20rem)] transform transition-transform duration-200 md:hidden ${
+            isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          <ThreadSidebar
+            threads={state.threads}
+            currentThreadId={state.currentThreadId}
+            newThreadWorkspacePath={newThreadWorkspaceDraft}
+            isMobileDrawer
+            onCloseMobile={() => setIsSidebarOpen(false)}
+            onSelectThread={(threadId) => {
+              void handleSelectThread(threadId);
+              setIsSidebarOpen(false);
+            }}
+            onNewThreadWorkspacePathChange={handleNewThreadWorkspacePathChange}
+            onCreateThread={() => {
+              void handleCreateThread();
+              setIsSidebarOpen(false);
+            }}
+          />
+        </div>
+
+        <div className="hidden h-full w-[18rem] md:flex">
+          <ThreadSidebar
+            threads={state.threads}
+            currentThreadId={state.currentThreadId}
+            newThreadWorkspacePath={newThreadWorkspaceDraft}
+            onSelectThread={(threadId) => {
+              void handleSelectThread(threadId);
+            }}
+            onNewThreadWorkspacePathChange={handleNewThreadWorkspacePathChange}
+            onCreateThread={() => {
+              void handleCreateThread();
+            }}
+          />
+        </div>
+
+        <section className="relative flex min-w-0 flex-1 flex-col p-3 md:p-6">
+          {!isHeaderCollapsed ? (
+            <header className="mb-3 rounded-2xl border border-[var(--border)] bg-[var(--panel)]/90 p-3 shadow-sm md:mb-4 md:p-4">
+              <div className="flex flex-wrap items-start gap-2 sm:items-center sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Codex Chat Console</h1>
+                  <p className="mt-1 text-sm text-[var(--muted-foreground)]">
+                    Auth: <span className="font-semibold">{state.authMode ?? "not authenticated"}</span>
+                  </p>
+                </div>
+
+                <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                  <div
+                    className={`inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-semibold sm:w-auto ${
+                      serverConnection === "connected"
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                        : serverConnection === "reconnecting"
+                          ? "border-amber-300 bg-amber-50 text-amber-700"
+                          : "border-slate-300 bg-slate-50 text-slate-700"
+                    }`}
+                  >
+                    <span
+                      className={`size-2 rounded-full ${
+                        serverConnection === "connected"
+                          ? "bg-emerald-500"
+                          : serverConnection === "reconnecting"
+                            ? "animate-pulse bg-amber-500"
+                            : "animate-pulse bg-slate-500"
+                      }`}
+                    />
+                    <span>
+                      {serverConnection === "connected"
+                        ? "Connected"
+                        : serverConnection === "reconnecting"
+                          ? "Reconnecting..."
+                          : "Connecting..."}
+                    </span>
+                  </div>
+
                   <button
                     type="button"
-                    onClick={() => {
-                      void handleCopyThreadId();
-                    }}
-                    className="rounded-md border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)]"
+                    onClick={() => setIsSidebarOpen(true)}
+                    className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] md:hidden"
                   >
-                    Copy
+                    Threads
                   </button>
-                  {threadCopyStatus === "copied" ? <span className="text-xs text-emerald-700">Copied</span> : null}
-                  {threadCopyStatus === "failed" ? <span className="text-xs text-rose-700">Failed</span> : null}
+
+                  <button
+                    type="button"
+                    onClick={() => setIsHeaderCollapsed(true)}
+                    className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
+                  >
+                    접기
+                  </button>
                 </div>
-              ) : null}
+              </div>
+
+              {currentThreadId ? (
+                <div className="mt-3 grid gap-2 sm:gap-3 lg:grid-cols-2">
+                  <div className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--panel-strong)]/50 px-2 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-[var(--muted-foreground)]">Thread ID</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleCopyThreadId();
+                        }}
+                        className="rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--panel)]"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                    <code className="mt-1 block min-w-0 break-all text-xs font-semibold text-[var(--foreground)] sm:truncate">
+                      {currentThreadId}
+                    </code>
+                    <div className="mt-1 min-h-4">
+                      {threadCopyStatus === "copied" ? (
+                        <span className="text-xs text-emerald-700">Copied</span>
+                      ) : null}
+                      {threadCopyStatus === "failed" ? (
+                        <span className="text-xs text-rose-700">Failed</span>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--panel-strong)]/50 px-2 py-2">
+                    <span className="text-xs text-[var(--muted-foreground)]">Workspace</span>
+                    <input
+                      type="text"
+                      value={currentWorkspaceDraft}
+                      onChange={(event) => handleCurrentThreadWorkspaceChange(event.target.value)}
+                      placeholder="/absolute/path/to/workspace"
+                      className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--panel)] px-2 py-1 text-xs font-semibold text-[var(--foreground)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)]"
+                    />
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!currentThreadId || !hasWorkspaceChanges}
+                        onClick={handleSaveCurrentThreadWorkspace}
+                        className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-2 py-1 text-xs font-semibold text-[var(--accent-foreground)] transition-colors hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!normalizeCwd(currentWorkspaceDraft)}
+                        onClick={() => {
+                          void handleCopyWorkspacePath();
+                        }}
+                        className="rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--panel)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Copy
+                      </button>
+                      {workspaceSaveStatus === "saved" ? <span className="text-xs text-emerald-700">Saved</span> : null}
+                      {workspaceCopyStatus === "copied" ? <span className="text-xs text-emerald-700">Copied</span> : null}
+                      {workspaceCopyStatus === "failed" ? <span className="text-xs text-rose-700">Failed</span> : null}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel-strong)]/50 px-3 py-2 text-xs text-[var(--muted-foreground)]">
+                  선택된 스레드가 없습니다.
+                </div>
+              )}
+            </header>
+          ) : null}
+
+          {isHeaderCollapsed ? (
+            <div className="pointer-events-none absolute right-3 top-3 z-20 md:right-6 md:top-6">
+              <button
+                type="button"
+                onClick={() => setIsHeaderCollapsed(false)}
+                className="pointer-events-auto inline-flex min-h-10 items-center rounded-lg border border-[var(--accent)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-foreground)] transition-colors hover:bg-[var(--accent-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
+              >
+                펼치기
+              </button>
             </div>
-            <div
-              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold ${
-                serverConnection === "connected"
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-                  : serverConnection === "reconnecting"
-                    ? "border-amber-300 bg-amber-50 text-amber-700"
-                    : "border-slate-300 bg-slate-50 text-slate-700"
-              }`}
-            >
-              <span
-                className={`size-2 rounded-full ${
-                  serverConnection === "connected"
-                    ? "bg-emerald-500"
-                    : serverConnection === "reconnecting"
-                      ? "animate-pulse bg-amber-500"
-                      : "animate-pulse bg-slate-500"
-                }`}
-              />
-              <span>
-                {serverConnection === "connected"
-                  ? "Connected"
-                  : serverConnection === "reconnecting"
-                    ? "Reconnecting..."
-                    : "Connecting..."}
-              </span>
-            </div>
-          </header>
+          ) : null}
 
           {loading ? (
             <div className="flex h-full items-center justify-center text-sm text-[var(--muted-foreground)]">Loading...</div>
@@ -368,7 +668,11 @@ export function ChatShell() {
                 }}
               />
 
-              <div className="mt-4 flex min-h-0 flex-1 flex-col gap-4">
+              <div
+                className={`flex min-h-0 flex-1 flex-col gap-3 md:gap-4 ${
+                  isHeaderCollapsed ? "mt-0 md:mt-0" : "mt-3 md:mt-4"
+                }`}
+              >
                 {loadingThreadHistoryId && loadingThreadHistoryId === currentThreadId ? (
                   <div className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700">
                     Loading thread history...

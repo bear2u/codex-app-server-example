@@ -100,14 +100,14 @@ export function MessageList({
   }, [firstMessageId, lastMessageSignature, messages.length, isThinking, toolStatuses.length, hasMoreHistory]);
 
   return (
-    <section ref={containerRef} className="flex-1 space-y-4 overflow-y-auto pr-2">
+    <section ref={containerRef} className="flex-1 space-y-3 overflow-y-auto pr-1 md:space-y-4 md:pr-2">
       {showLoadMoreButton ? (
         <div className="sticky top-0 z-10 flex justify-center py-1">
           <button
             type="button"
             onClick={onLoadMoreHistory}
             disabled={loadingMoreHistory}
-            className="rounded-full border border-[var(--border)] bg-[var(--panel)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="min-h-10 rounded-full border border-[var(--border)] bg-[var(--panel)] px-3 py-1 text-xs font-medium text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {loadingMoreHistory ? "불러오는 중..." : "더 불러오기"}
           </button>
@@ -129,7 +129,7 @@ export function MessageList({
 
       {isThinking ? (
         <div className="flex justify-start">
-          <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--panel)] px-4 py-3 text-sm text-[var(--muted-foreground)]">
+          <div className="inline-flex items-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--panel)] px-3 py-2.5 text-xs text-[var(--muted-foreground)] sm:px-4 sm:py-3 sm:text-sm">
             <span className="inline-flex items-center gap-1">
               <span className="size-2 animate-pulse rounded-full bg-[var(--accent)] [animation-delay:0ms]" />
               <span className="size-2 animate-pulse rounded-full bg-[var(--accent)] [animation-delay:150ms]" />

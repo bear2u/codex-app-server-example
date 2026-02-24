@@ -67,4 +67,71 @@ describe("NotificationRouter", () => {
       payload: { threadId: "thread-1", turnId: "turn-1", status: "completed", error: undefined },
     });
   });
+
+  it("maps commandExecution with string command without throwing", () => {
+    const rpc = new EventEmitter();
+    const publish = vi.fn();
+
+    const router = new NotificationRouter(
+      rpc as any,
+      { publish } as any,
+      createLoggerStub(),
+    );
+
+    router.start();
+
+    rpc.emit("notification", {
+      method: "item/started",
+      params: {
+        item: {
+          id: "item-cmd-1",
+          type: "commandExecution",
+          command: "npm run build",
+        },
+      },
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: "tool.status",
+      payload: {
+        itemId: "item-cmd-1",
+        tool: "command:npm run build",
+        status: "inProgress",
+      },
+    });
+  });
+
+  it("maps failed commandExecution completion as failed status", () => {
+    const rpc = new EventEmitter();
+    const publish = vi.fn();
+
+    const router = new NotificationRouter(
+      rpc as any,
+      { publish } as any,
+      createLoggerStub(),
+    );
+
+    router.start();
+
+    rpc.emit("notification", {
+      method: "item/completed",
+      params: {
+        item: {
+          id: "item-cmd-2",
+          type: "commandExecution",
+          command: { host: "api.openai.com", protocol: "https" },
+          status: "failed",
+        },
+      },
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: "tool.status",
+      payload: {
+        itemId: "item-cmd-2",
+        tool: "command:https://api.openai.com",
+        status: "failed",
+      },
+    });
+  });
 });

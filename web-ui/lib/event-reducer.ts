@@ -2,6 +2,7 @@ import type {
   CommandApprovalPayload,
   FileApprovalPayload,
   SourceRef,
+  ThreadHistoryAttachment,
   ThreadSummary,
   UiEvent,
 } from "@codex-app/shared-contracts";
@@ -12,6 +13,7 @@ export interface ChatMessage {
   text: string;
   createdAt: number;
   itemId?: string;
+  attachments?: ThreadHistoryAttachment[];
 }
 
 export interface ToolStatusView {
@@ -53,7 +55,9 @@ export type ChatAction =
       nextCursor: string | null;
     }
   | { type: "select-thread"; threadId: string }
-  | { type: "append-user-message"; threadId: string; text: string }
+  | { type: "set-active-turn"; threadId: string; turnId: string }
+  | { type: "clear-active-turn" }
+  | { type: "append-user-message"; threadId: string; text: string; attachments?: ThreadHistoryAttachment[] }
   | { type: "apply-ui-event"; event: UiEvent }
   | { type: "consume-command-approval"; requestId: string }
   | { type: "consume-file-approval"; requestId: string };
@@ -74,6 +78,12 @@ export const initialChatState: ChatState = {
   fileApprovals: [],
   errors: [],
 };
+
+const MAX_VISIBLE_THREADS = 10;
+
+function limitRecentThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  return threads.slice(0, MAX_VISIBLE_THREADS);
+}
 
 function buildAssistantMap(messages: ChatMessage[]): Record<string, string> {
   const map: Record<string, string> = {};
@@ -106,7 +116,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "hydrate-threads": {
       return {
         ...state,
-        threads: action.threads,
+        threads: limitRecentThreads(action.threads),
         currentThreadId: state.currentThreadId ?? action.threads[0]?.id ?? null,
       };
     }
@@ -114,6 +124,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         currentThreadId: action.threadId,
+      };
+    }
+    case "set-active-turn": {
+      return {
+        ...state,
+        currentThreadId: action.threadId,
+        activeTurnId: action.turnId,
+      };
+    }
+    case "clear-active-turn": {
+      return {
+        ...state,
+        activeTurnId: null,
       };
     }
     case "replace-thread-history-page": {
@@ -171,6 +194,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               role: "user",
               text: action.text,
               createdAt: Date.now(),
+              attachments: action.attachments,
             },
           ],
         },
@@ -214,7 +238,7 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
       return {
         ...state,
         currentThreadId: event.payload.threadId,
-        threads: [{ id: event.payload.threadId }, ...state.threads],
+        threads: limitRecentThreads([{ id: event.payload.threadId }, ...state.threads]),
       };
     }
     case "turn.started": {

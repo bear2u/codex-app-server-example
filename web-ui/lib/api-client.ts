@@ -1,6 +1,7 @@
 import type {
   AuthStateResponse,
   CommandApprovalDecision,
+  CreateThreadRequest,
   CreateThreadResponse,
   FileApprovalDecision,
   StartChatgptLoginResponse,
@@ -67,8 +68,17 @@ export function readAuthState(): Promise<AuthStateResponse> {
   return request("/v1/auth/state");
 }
 
-export function listThreads(): Promise<ThreadListResponse> {
-  return request("/v1/threads");
+export function listThreads(query: { cursor?: string | null; limit?: number } = {}): Promise<ThreadListResponse> {
+  const params = new URLSearchParams();
+  if (query.cursor) {
+    params.set("cursor", query.cursor);
+  }
+  if (query.limit) {
+    params.set("limit", String(query.limit));
+  }
+
+  const queryString = params.toString();
+  return request(`/v1/threads${queryString ? `?${queryString}` : ""}`);
 }
 
 export function listThreadMessages(
@@ -87,10 +97,10 @@ export function listThreadMessages(
   return request(`/v1/threads/${threadId}/messages${queryString ? `?${queryString}` : ""}`);
 }
 
-export function createThread(): Promise<CreateThreadResponse> {
+export function createThread(payload: CreateThreadRequest = {}): Promise<CreateThreadResponse> {
   return request("/v1/threads", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload),
   });
 }
 

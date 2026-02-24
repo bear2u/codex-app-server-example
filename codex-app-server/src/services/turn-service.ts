@@ -16,7 +16,7 @@ export class TurnService {
       effort: request.effort,
       summary: request.summary,
       personality: request.personality,
-      cwd: request.cwd ?? this.env.codexCwd ?? process.cwd(),
+      cwd: request.cwd,
       approvalPolicy: this.env.codexApprovalPolicy,
       sandboxPolicy: {
         type: "workspaceWrite",

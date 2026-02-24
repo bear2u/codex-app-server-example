@@ -146,6 +146,7 @@ Browser EventSource
 - `CODEX_APPROVAL_POLICY`: 승인 정책
 - `CODEX_WRITABLE_ROOTS`: 쓰기 허용 루트
 - `CODEX_NETWORK_ACCESS`: 네트워크 허용 여부
+- `HTTP_BODY_LIMIT_MB`: HTTP JSON 바디 최대 크기(MB, 이미지 첨부 시 중요)
 - `SSE_HEARTBEAT_MS`: SSE heartbeat 주기
 - `THREAD_MESSAGES_PAGE_SIZE`: 채팅 히스토리 기본 페이지 크기(기본 `10`)
 

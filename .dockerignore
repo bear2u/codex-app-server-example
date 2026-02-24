@@ -1,0 +1,13 @@
+.git
+.DS_Store
+.turbo
+.npm-cache
+node_modules
+**/node_modules
+.pnpm-store
+**/.next
+**/dist
+*.log
+web-ui/.env
+web-ui/.env.local
+codex-app-server/.env

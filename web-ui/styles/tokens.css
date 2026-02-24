@@ -7,11 +7,11 @@
   --panel-strong: #edf7fb;
   --border: #cdddea;
 
-  --accent: #0f766e;
-  --accent-strong: #0b5f59;
-  --accent-foreground: #ecfeff;
+  --accent: #1c7f79;
+  --accent-strong: #166c67;
+  --accent-foreground: #f2fffd;
   --focus: #0ea5e9;
 
-  --teal-soft: rgba(20, 184, 166, 0.18);
+  --teal-soft: rgba(28, 127, 121, 0.18);
   --sky-soft: rgba(14, 165, 233, 0.2);
 }

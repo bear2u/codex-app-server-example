@@ -1,6 +1,7 @@
 import type {
   CreateThreadRequest,
   CreateThreadResponse,
+  ThreadHistoryAttachment,
   ThreadHistoryMessage,
   ThreadListRequest,
   ThreadListResponse,
@@ -31,12 +32,13 @@ function normalizeTimestamp(value: number | undefined, fallback: number): number
   return value < 1_000_000_000_000 ? value * 1000 : value;
 }
 
-function extractUserText(content: unknown): string {
+function extractUserContent(content: unknown): { text: string; attachments: ThreadHistoryAttachment[] } {
   if (!Array.isArray(content)) {
-    return "";
+    return { text: "", attachments: [] };
   }
 
   const chunks: string[] = [];
+  const attachments: ThreadHistoryAttachment[] = [];
   for (const part of content) {
     if (!isRecord(part)) {
       continue;
@@ -47,10 +49,29 @@ function extractUserText(content: unknown): string {
       if (text) {
         chunks.push(text);
       }
+      continue;
+    }
+
+    if (part.type === "image") {
+      const url = asString(part.url);
+      if (url) {
+        attachments.push({ type: "image", url });
+      }
+      continue;
+    }
+
+    if (part.type === "localImage") {
+      const path = asString(part.path);
+      if (path) {
+        attachments.push({ type: "localImage", path });
+      }
     }
   }
 
-  return chunks.join("\n").trim();
+  return {
+    text: chunks.join("\n").trim(),
+    attachments,
+  };
 }
 
 function extractThreadMessages(threadId: string, thread: Record<string, unknown>): ThreadHistoryMessage[] {
@@ -83,17 +104,18 @@ function extractThreadMessages(threadId: string, thread: Record<string, unknown>
       const createdAt = baseTimestamp + itemIndex;
 
       if (itemType === "userMessage") {
-        const text = extractUserText(item.content);
-        if (!text) {
+        const userContent = extractUserContent(item.content);
+        if (!userContent.text && userContent.attachments.length === 0) {
           continue;
         }
 
         messages.push({
           id: itemId ?? `${threadId}-user-${turnIndex}-${itemIndex}`,
           role: "user",
-          text,
+          text: userContent.text,
           createdAt,
           itemId,
+          attachments: userContent.attachments.length ? userContent.attachments : undefined,
         });
         continue;
       }

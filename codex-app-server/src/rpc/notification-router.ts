@@ -98,13 +98,18 @@ export class NotificationRouter {
         }
 
         if (itemType === "commandExecution") {
-          const command = (item.command as string[] | undefined) ?? [];
+          const commandLabel = this.toCommandLabel(item.command);
+          const completedStatus = typeof item.status === "string" ? item.status : undefined;
+          const resultStatus =
+            method === "item/completed" && (completedStatus === "failed" || completedStatus === "declined")
+              ? "failed"
+              : status;
           this.emit({
             type: "tool.status",
             payload: {
               itemId,
-              tool: `command:${command.join(" ")}`,
-              status,
+              tool: commandLabel ? `command:${commandLabel}` : "command",
+              status: resultStatus,
             },
           });
           return;
@@ -155,5 +160,42 @@ export class NotificationRouter {
     }
 
     return typeof current === "string" ? current : undefined;
+  }
+
+  private toCommandLabel(command: unknown): string {
+    if (Array.isArray(command)) {
+      return command.map((entry) => String(entry)).join(" ").trim();
+    }
+
+    if (typeof command === "string") {
+      return command.trim();
+    }
+
+    if (!command || typeof command !== "object") {
+      return "";
+    }
+
+    const record = command as Record<string, unknown>;
+
+    // Some command approvals are network-scoped and may not expose shell argv.
+    if (typeof record.host === "string") {
+      const protocol = typeof record.protocol === "string" ? record.protocol : "network";
+      return `${protocol}://${record.host}`;
+    }
+
+    const argv = record.argv;
+    if (Array.isArray(argv)) {
+      return argv.map((entry) => String(entry)).join(" ").trim();
+    }
+
+    const cmd = record.command;
+    if (Array.isArray(cmd)) {
+      return cmd.map((entry) => String(entry)).join(" ").trim();
+    }
+    if (typeof cmd === "string") {
+      return cmd.trim();
+    }
+
+    return "[structured-command]";
   }
 }

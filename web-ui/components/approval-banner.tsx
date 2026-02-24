@@ -23,28 +23,28 @@ function ActionButtons({
       <button
         type="button"
         onClick={() => onAction("accept")}
-        className="cursor-pointer rounded-md border border-emerald-500 bg-emerald-500 px-2 py-1 text-xs font-semibold text-white"
+        className="cursor-pointer rounded-md border border-emerald-500 bg-emerald-500 px-2 py-2 text-xs font-semibold text-white"
       >
         Accept
       </button>
       <button
         type="button"
         onClick={() => onAction("acceptForSession")}
-        className="cursor-pointer rounded-md border border-sky-500 bg-sky-500 px-2 py-1 text-xs font-semibold text-white"
+        className="cursor-pointer rounded-md border border-sky-500 bg-sky-500 px-2 py-2 text-xs font-semibold text-white"
       >
         Accept Session
       </button>
       <button
         type="button"
         onClick={() => onAction("decline")}
-        className="cursor-pointer rounded-md border border-rose-500 bg-rose-500 px-2 py-1 text-xs font-semibold text-white"
+        className="cursor-pointer rounded-md border border-rose-500 bg-rose-500 px-2 py-2 text-xs font-semibold text-white"
       >
         Decline
       </button>
       <button
         type="button"
         onClick={() => onAction("cancel")}
-        className="cursor-pointer rounded-md border border-slate-400 bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700"
+        className="cursor-pointer rounded-md border border-slate-400 bg-slate-200 px-2 py-2 text-xs font-semibold text-slate-700"
       >
         Cancel
       </button>

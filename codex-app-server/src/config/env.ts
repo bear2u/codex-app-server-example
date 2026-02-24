@@ -13,6 +13,7 @@ const envSchema = z.object({
   CODEX_APPROVAL_POLICY: z.string().default("on-request"),
   CODEX_WRITABLE_ROOTS: z.string().default(process.cwd()),
   CODEX_NETWORK_ACCESS: z.enum(["true", "false"]).default("true"),
+  HTTP_BODY_LIMIT_MB: z.coerce.number().positive().max(100).default(20),
   SSE_HEARTBEAT_MS: z.coerce.number().default(15000),
   THREAD_MESSAGES_PAGE_SIZE: z.coerce.number().int().positive().max(100).default(10),
 });
@@ -28,6 +29,7 @@ export type Env = {
   codexApprovalPolicy: string;
   codexWritableRoots: string[];
   codexNetworkAccess: boolean;
+  httpBodyLimitBytes: number;
   sseHeartbeatMs: number;
   threadMessagesPageSize: number;
 };
@@ -67,6 +69,7 @@ export function loadEnv(): Env {
     codexApprovalPolicy: normalizedApprovalPolicy,
     codexWritableRoots: parsed.CODEX_WRITABLE_ROOTS.split(":").map((entry) => entry.trim()),
     codexNetworkAccess: parsed.CODEX_NETWORK_ACCESS === "true",
+    httpBodyLimitBytes: Math.floor(parsed.HTTP_BODY_LIMIT_MB * 1024 * 1024),
     sseHeartbeatMs: parsed.SSE_HEARTBEAT_MS,
     threadMessagesPageSize: parsed.THREAD_MESSAGES_PAGE_SIZE,
   };

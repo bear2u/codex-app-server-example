@@ -22,6 +22,7 @@ export async function createApp(env: Env) {
     logger: {
       level: env.nodeEnv === "development" ? "info" : "warn",
     },
+    bodyLimit: env.httpBodyLimitBytes,
   });
 
   await app.register(cors, {

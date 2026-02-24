@@ -78,7 +78,12 @@ export interface ThreadHistoryMessage {
   text: string;
   createdAt: number;
   itemId?: string;
+  attachments?: ThreadHistoryAttachment[];
 }
+
+export type ThreadHistoryAttachment =
+  | { type: "image"; url: string }
+  | { type: "localImage"; path: string };
 
 export interface ThreadMessageListRequest {
   cursor?: string | null;

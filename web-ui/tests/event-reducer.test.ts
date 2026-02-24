@@ -46,4 +46,33 @@ describe("chatReducer", () => {
     expect(state.commandApprovals).toHaveLength(1);
     expect(state.commandApprovals[0]?.requestId).toBe("req-1");
   });
+
+  it("sets and clears active turn state", () => {
+    const withActiveTurn = chatReducer(initialChatState, {
+      type: "set-active-turn",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+
+    expect(withActiveTurn.currentThreadId).toBe("thread-1");
+    expect(withActiveTurn.activeTurnId).toBe("turn-1");
+
+    const cleared = chatReducer(withActiveTurn, { type: "clear-active-turn" });
+    expect(cleared.activeTurnId).toBeNull();
+  });
+
+  it("keeps only the latest 10 threads in state", () => {
+    const threads = Array.from({ length: 12 }, (_, index) => ({
+      id: `thread-${index + 1}`,
+    }));
+
+    const hydrated = chatReducer(initialChatState, {
+      type: "hydrate-threads",
+      threads,
+    });
+
+    expect(hydrated.threads).toHaveLength(10);
+    expect(hydrated.threads[0]?.id).toBe("thread-1");
+    expect(hydrated.threads[9]?.id).toBe("thread-10");
+  });
 });
