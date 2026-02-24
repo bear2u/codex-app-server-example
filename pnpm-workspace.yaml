@@ -1,0 +1,4 @@
+packages:
+  - "web-ui"
+  - "codex-app-server"
+  - "packages/*"

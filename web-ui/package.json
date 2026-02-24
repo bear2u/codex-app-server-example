@@ -1,0 +1,33 @@
+{
+  "name": "web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "predev": "pnpm --filter @codex-app/shared-contracts build",
+    "dev": "next dev --port 3000",
+    "prebuild": "pnpm --filter @codex-app/shared-contracts build",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "lint": "eslint .",
+    "pretypecheck": "pnpm --filter @codex-app/shared-contracts build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codex-app/shared-contracts": "workspace:*",
+    "next": "16.1.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "20.19.33",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.3",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}
