@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useState } from "react";
-import type { CommandApprovalDecision, FileApprovalDecision, TurnInputItem } from "@codex-app/shared-contracts";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import type {
+  CommandApprovalDecision,
+  FileApprovalDecision,
+  TurnInputItem,
+  UiEvent,
+  UiEventEnvelope,
+} from "@codex-app/shared-contracts";
 import {
   approveCommand,
   approveFileChange,
   createThread,
   interruptTurn,
+  listModels,
   listThreadMessages,
   listThreads,
   readAuthState,
@@ -16,6 +23,7 @@ import {
 import { chatReducer, initialChatState } from "@/lib/event-reducer";
 import { connectUiEventStream } from "@/lib/sse-client";
 import { ApprovalBanner } from "./approval-banner";
+import { LogPanel, type UiLogEntry } from "./log-panel";
 import { MessageList } from "./message-list";
 import { PromptComposer, type PromptComposerImageAttachment } from "./prompt-composer";
 import { ThreadSidebar } from "./thread-sidebar";
@@ -24,10 +32,86 @@ const THREAD_LIST_LIMIT = 10;
 const WORKSPACE_BY_THREAD_STORAGE_KEY = "codex.workspaceByThreadId";
 const NEW_THREAD_WORKSPACE_STORAGE_KEY = "codex.newThreadWorkspaceDraft";
 const HEADER_COLLAPSED_STORAGE_KEY = "codex.headerCollapsed";
+const SELECTED_MODEL_STORAGE_KEY = "codex.selectedModel";
+const LOG_PANEL_ENABLED_STORAGE_KEY = "codex.logPanelEnabled";
+const MAX_UI_LOG_ENTRIES = 300;
 
 function normalizeCwd(value: string): string | undefined {
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function summarizeUiEvent(event: UiEvent): { message: string; detail?: string; level: UiLogEntry["level"] } {
+  switch (event.type) {
+    case "auth.updated":
+      return {
+        message: "auth.updated",
+        detail: `authMode=${event.payload.authMode ?? "none"}`,
+        level: "info",
+      };
+    case "thread.started":
+      return {
+        message: "thread.started",
+        detail: `threadId=${event.payload.threadId}`,
+        level: "info",
+      };
+    case "turn.started":
+      return {
+        message: "turn.started",
+        detail: `threadId=${event.payload.threadId} turnId=${event.payload.turnId}`,
+        level: "info",
+      };
+    case "turn.completed":
+      return {
+        message: "turn.completed",
+        detail: `threadId=${event.payload.threadId} turnId=${event.payload.turnId} status=${event.payload.status}`,
+        level: event.payload.status === "failed" ? "error" : "info",
+      };
+    case "tool.status":
+      return {
+        message: "tool.status",
+        detail: `itemId=${event.payload.itemId} tool=${event.payload.tool} status=${event.payload.status}`,
+        level: event.payload.status === "failed" ? "error" : "info",
+      };
+    case "sources.updated":
+      return {
+        message: "sources.updated",
+        detail: `itemId=${event.payload.itemId} count=${event.payload.sources.length}`,
+        level: "info",
+      };
+    case "approval.command.requested":
+      return {
+        message: "approval.command.requested",
+        detail: `requestId=${event.payload.requestId} turnId=${event.payload.turnId}`,
+        level: "warn",
+      };
+    case "approval.filechange.requested":
+      return {
+        message: "approval.filechange.requested",
+        detail: `requestId=${event.payload.requestId} turnId=${event.payload.turnId}`,
+        level: "warn",
+      };
+    case "agent.delta":
+      return {
+        message: "agent.delta",
+        detail: `itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
+        level: "info",
+      };
+    case "reasoning.delta":
+      return {
+        message: "reasoning.delta",
+        detail: `itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
+        level: "info",
+      };
+    case "error":
+      return {
+        message: "error",
+        detail: `${event.payload.code}: ${event.payload.message}`,
+        level: "error",
+      };
+    default:
+      return { message: "unknown", level: "info" };
+  }
 }
 
 export function ChatShell() {
@@ -50,6 +134,33 @@ export function ChatShell() {
   const [currentWorkspaceDraft, setCurrentWorkspaceDraft] = useState("");
   const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [modelOptions, setModelOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [logsEnabled, setLogsEnabled] = useState(true);
+  const [uiLogs, setUiLogs] = useState<UiLogEntry[]>([]);
+  const logsEnabledRef = useRef(true);
+  const streamDeltaSeenRef = useRef(new Set<string>());
+
+  const appendLog = useCallback((entry: Omit<UiLogEntry, "id" | "ts">) => {
+    if (!logsEnabledRef.current) {
+      return;
+    }
+
+    const nextEntry: UiLogEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      ts: Date.now(),
+    };
+
+    setUiLogs((prev) => {
+      const next = [...prev, nextEntry];
+      if (next.length > MAX_UI_LOG_ENTRIES) {
+        return next.slice(next.length - MAX_UI_LOG_ENTRIES);
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -78,6 +189,16 @@ export function ChatShell() {
       if (savedHeaderCollapsed === "1") {
         setIsHeaderCollapsed(true);
       }
+
+      const savedSelectedModel = window.localStorage.getItem(SELECTED_MODEL_STORAGE_KEY);
+      if (savedSelectedModel) {
+        setSelectedModel(savedSelectedModel);
+      }
+
+      const savedLogPanelEnabled = window.localStorage.getItem(LOG_PANEL_ENABLED_STORAGE_KEY);
+      if (savedLogPanelEnabled === "0") {
+        setLogsEnabled(false);
+      }
     } catch {
       // Ignore storage parse issues; user can re-enter workspace paths.
     }
@@ -105,6 +226,28 @@ export function ChatShell() {
   }, [isHeaderCollapsed]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (selectedModel) {
+      window.localStorage.setItem(SELECTED_MODEL_STORAGE_KEY, selectedModel);
+    } else {
+      window.localStorage.removeItem(SELECTED_MODEL_STORAGE_KEY);
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
+    logsEnabledRef.current = logsEnabled;
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(LOG_PANEL_ENABLED_STORAGE_KEY, logsEnabled ? "1" : "0");
+  }, [logsEnabled]);
+
+  useEffect(() => {
     let mounted = true;
 
     const bootstrap = async () => {
@@ -114,6 +257,13 @@ export function ChatShell() {
         if (!mounted) {
           return;
         }
+
+        appendLog({
+          source: "network",
+          level: "info",
+          message: "bootstrap loaded",
+          detail: `authMode=${auth.authMode ?? "none"} threads=${threads.data.length}`,
+        });
 
         dispatch({
           type: "apply-ui-event",
@@ -135,15 +285,60 @@ export function ChatShell() {
             messages: page.data,
             nextCursor: page.nextCursor,
           });
+          appendLog({
+            source: "network",
+            level: "info",
+            message: "thread history loaded",
+            detail: `threadId=${initialThreadId} messages=${page.data.length}`,
+          });
         }
       } catch (bootstrapError) {
         if (mounted) {
           setError(bootstrapError instanceof Error ? bootstrapError.message : "Failed to bootstrap chat UI");
         }
+        appendLog({
+          source: "network",
+          level: "error",
+          message: "bootstrap failed",
+          detail: bootstrapError instanceof Error ? bootstrapError.message : "Unknown bootstrap error",
+        });
       } finally {
+        try {
+          const models = await listModels({ limit: 50 });
+          if (mounted) {
+            const options = models.data.map((model) => ({
+              id: model.id,
+              label: model.displayName ? `${model.displayName} (${model.id})` : model.id,
+            }));
+            setModelOptions(options);
+            setSelectedModel((prev) => {
+              if (prev && options.some((option) => option.id === prev)) {
+                return prev;
+              }
+              return options[0]?.id ?? "";
+            });
+          }
+          appendLog({
+            source: "network",
+            level: "info",
+            message: "model list loaded",
+            detail: `models=${models.data.length}`,
+          });
+        } catch {
+          if (mounted) {
+            setModelOptions([]);
+          }
+          appendLog({
+            source: "network",
+            level: "warn",
+            message: "model list unavailable",
+          });
+        }
+
         if (mounted) {
           setLoadingThreadHistoryId(null);
           setLoading(false);
+          setModelsLoading(false);
         }
       }
     };
@@ -151,7 +346,7 @@ export function ChatShell() {
     void bootstrap();
 
     const disconnect = connectUiEventStream(
-      (event) => {
+      (event: UiEvent, envelope: UiEventEnvelope) => {
         if (mounted) {
           setStreamDisconnected(false);
           setServerConnection("connected");
@@ -159,6 +354,33 @@ export function ChatShell() {
             setIsAwaitingAssistant(false);
           }
         }
+
+        if (event.type === "agent.delta" || event.type === "reasoning.delta") {
+          const streamKey = `${event.type}:${event.payload.itemId}`;
+          if (!streamDeltaSeenRef.current.has(streamKey)) {
+            streamDeltaSeenRef.current.add(streamKey);
+            const summary = summarizeUiEvent(event);
+            appendLog({
+              source: "sse",
+              level: summary.level,
+              message: `${summary.message}#${envelope.id}`,
+              detail: summary.detail,
+            });
+          }
+        } else {
+          const summary = summarizeUiEvent(event);
+          appendLog({
+            source: "sse",
+            level: summary.level,
+            message: `${summary.message}#${envelope.id}`,
+            detail: summary.detail,
+          });
+        }
+
+        if (event.type === "turn.completed") {
+          streamDeltaSeenRef.current.clear();
+        }
+
         dispatch({ type: "apply-ui-event", event });
       },
       () => {
@@ -166,12 +388,22 @@ export function ChatShell() {
           setStreamDisconnected(true);
           setServerConnection("reconnecting");
         }
+        appendLog({
+          source: "sse",
+          level: "warn",
+          message: "event stream disconnected",
+        });
       },
       () => {
         if (mounted) {
           setStreamDisconnected(false);
           setServerConnection("connected");
         }
+        appendLog({
+          source: "sse",
+          level: "info",
+          message: "event stream connected",
+        });
       },
     );
 
@@ -179,7 +411,7 @@ export function ChatShell() {
       mounted = false;
       disconnect();
     };
-  }, []);
+  }, [appendLog]);
 
   const currentThreadId = state.currentThreadId;
   const currentMessages = currentThreadId ? (state.messagesByThreadId[currentThreadId] ?? []) : [];
@@ -205,6 +437,16 @@ export function ChatShell() {
     setNewThreadWorkspaceDraft(value);
   };
 
+  const handleModelChange = (model: string) => {
+    setSelectedModel(model);
+    appendLog({
+      source: "ui",
+      level: "info",
+      message: "model selected",
+      detail: `model=${model || "default"}`,
+    });
+  };
+
   useEffect(() => {
     setCurrentWorkspaceDraft(currentThreadWorkspace);
     setWorkspaceSaveStatus("idle");
@@ -221,7 +463,11 @@ export function ChatShell() {
     }
 
     const threadCwd = resolveThreadCwd(null);
-    const created = await createThread(threadCwd ? { cwd: threadCwd } : {});
+    const model = selectedModel || undefined;
+    const created = await createThread({
+      ...(threadCwd ? { cwd: threadCwd } : {}),
+      ...(model ? { model } : {}),
+    });
     if (threadCwd) {
       setWorkspaceByThreadId((prev) => ({
         ...prev,
@@ -242,7 +488,11 @@ export function ChatShell() {
     try {
       setError(null);
       const threadCwd = normalizeCwd(newThreadWorkspaceDraft);
-      const created = await createThread(threadCwd ? { cwd: threadCwd } : {});
+      const model = selectedModel || undefined;
+      const created = await createThread({
+        ...(threadCwd ? { cwd: threadCwd } : {}),
+        ...(model ? { model } : {}),
+      });
       if (threadCwd) {
         setWorkspaceByThreadId((prev) => ({
           ...prev,
@@ -256,8 +506,20 @@ export function ChatShell() {
         messages: [],
         nextCursor: null,
       });
+      appendLog({
+        source: "ui",
+        level: "info",
+        message: "thread created",
+        detail: `threadId=${created.threadId}${model ? ` model=${model}` : ""}${threadCwd ? ` cwd=${threadCwd}` : ""}`,
+      });
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Failed to create thread");
+      appendLog({
+        source: "ui",
+        level: "error",
+        message: "thread create failed",
+        detail: createError instanceof Error ? createError.message : "Unknown error",
+      });
     }
   };
 
@@ -275,11 +537,29 @@ export function ChatShell() {
           messages: page.data,
           nextCursor: page.nextCursor,
         });
+        appendLog({
+          source: "network",
+          level: "info",
+          message: "thread history loaded",
+          detail: `threadId=${threadId} messages=${page.data.length}`,
+        });
       }
 
       await resumeThread(threadId);
+      appendLog({
+        source: "ui",
+        level: "info",
+        message: "thread selected",
+        detail: `threadId=${threadId}`,
+      });
     } catch (resumeError) {
       setError(resumeError instanceof Error ? resumeError.message : "Failed to resume thread");
+      appendLog({
+        source: "ui",
+        level: "error",
+        message: "thread select/resume failed",
+        detail: resumeError instanceof Error ? resumeError.message : "Unknown error",
+      });
     } finally {
       setLoadingThreadHistoryId(null);
     }
@@ -306,8 +586,20 @@ export function ChatShell() {
         messages: page.data,
         nextCursor: page.nextCursor,
       });
+      appendLog({
+        source: "network",
+        level: "info",
+        message: "thread history prepended",
+        detail: `threadId=${threadId} messages=${page.data.length}`,
+      });
     } catch (historyError) {
       setError(historyError instanceof Error ? historyError.message : "Failed to load more history");
+      appendLog({
+        source: "network",
+        level: "error",
+        message: "load more history failed",
+        detail: historyError instanceof Error ? historyError.message : "Unknown error",
+      });
     } finally {
       setLoadingMoreHistoryThreadId(null);
     }
@@ -347,16 +639,35 @@ export function ChatShell() {
       });
 
       const threadCwd = resolveThreadCwd(threadId);
+      appendLog({
+        source: "ui",
+        level: "info",
+        message: "turn.start requested",
+        detail: `threadId=${threadId}${selectedModel ? ` model=${selectedModel}` : ""}${threadCwd ? ` cwd=${threadCwd}` : ""} input=${input.length}`,
+      });
       const started = await startTurn(threadId, {
         input,
+        model: selectedModel || undefined,
         cwd: threadCwd,
       });
       // Keep interrupt state usable even if turn/started SSE arrives late or is briefly missed.
       dispatch({ type: "set-active-turn", threadId, turnId: started.turnId });
+      appendLog({
+        source: "network",
+        level: "info",
+        message: "turn.start accepted",
+        detail: `threadId=${threadId} turnId=${started.turnId}`,
+      });
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "Failed to start turn");
       setIsAwaitingAssistant(false);
       dispatch({ type: "clear-active-turn" });
+      appendLog({
+        source: "network",
+        level: "error",
+        message: "turn.start failed",
+        detail: sendError instanceof Error ? sendError.message : "Unknown error",
+      });
     } finally {
       setSending(false);
     }
@@ -371,8 +682,20 @@ export function ChatShell() {
       await interruptTurn(state.currentThreadId, state.activeTurnId);
       dispatch({ type: "clear-active-turn" });
       setIsAwaitingAssistant(false);
+      appendLog({
+        source: "ui",
+        level: "warn",
+        message: "turn interrupted",
+        detail: `threadId=${state.currentThreadId} turnId=${state.activeTurnId}`,
+      });
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : "Failed to stop turn");
+      appendLog({
+        source: "network",
+        level: "error",
+        message: "turn interrupt failed",
+        detail: interruptError instanceof Error ? interruptError.message : "Unknown error",
+      });
     }
   };
 
@@ -554,6 +877,18 @@ export function ChatShell() {
 
                   <button
                     type="button"
+                    onClick={() => setLogsEnabled((prev) => !prev)}
+                    className={`inline-flex min-h-10 items-center rounded-lg border px-3 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] ${
+                      logsEnabled
+                        ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-foreground)] hover:bg-[var(--accent-strong)]"
+                        : "border-[var(--border)] bg-[var(--panel)] text-[var(--foreground)] hover:bg-[var(--panel-strong)]"
+                    }`}
+                  >
+                    Logs {logsEnabled ? "On" : "Off"}
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => setIsHeaderCollapsed(true)}
                     className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
                   >
@@ -668,36 +1003,49 @@ export function ChatShell() {
                 }}
               />
 
-              <div
-                className={`flex min-h-0 flex-1 flex-col gap-3 md:gap-4 ${
-                  isHeaderCollapsed ? "mt-0 md:mt-0" : "mt-3 md:mt-4"
-                }`}
-              >
-                {loadingThreadHistoryId && loadingThreadHistoryId === currentThreadId ? (
-                  <div className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                    Loading thread history...
+              <div className={`flex min-h-0 flex-1 gap-3 md:gap-4 ${isHeaderCollapsed ? "mt-0" : "mt-3 md:mt-4"}`}>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 md:gap-4">
+                  {loadingThreadHistoryId && loadingThreadHistoryId === currentThreadId ? (
+                    <div className="rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                      Loading thread history...
+                    </div>
+                  ) : null}
+
+                  <MessageList
+                    messages={currentMessages}
+                    reasoningByItemId={state.reasoningByItemId}
+                    sourcesByItemId={state.sourcesByItemId}
+                    toolStatuses={toolStatuses}
+                    isThinking={isThinking}
+                    hasMoreHistory={hasMoreHistory}
+                    loadingMoreHistory={loadingMoreHistory}
+                    onLoadMoreHistory={handleLoadMoreHistory}
+                  />
+
+                  <PromptComposer
+                    disabled={!state.authMode || isThinking}
+                    sending={sending}
+                    thinking={isThinking}
+                    canInterrupt={!!state.activeTurnId}
+                    modelOptions={modelOptions}
+                    selectedModel={selectedModel}
+                    modelsLoading={modelsLoading}
+                    onModelChange={handleModelChange}
+                    onSend={handleSend}
+                    onInterrupt={handleInterrupt}
+                  />
+                </div>
+
+                {logsEnabled ? (
+                  <div className="hidden min-h-0 w-[22rem] lg:flex">
+                    <LogPanel
+                      entries={uiLogs}
+                      logsEnabled={logsEnabled}
+                      onToggleLogs={() => setLogsEnabled((prev) => !prev)}
+                      onClearLogs={() => setUiLogs([])}
+                    />
                   </div>
                 ) : null}
-
-                <MessageList
-                  messages={currentMessages}
-                  reasoningByItemId={state.reasoningByItemId}
-                  sourcesByItemId={state.sourcesByItemId}
-                  toolStatuses={toolStatuses}
-                  isThinking={isThinking}
-                  hasMoreHistory={hasMoreHistory}
-                  loadingMoreHistory={loadingMoreHistory}
-                  onLoadMoreHistory={handleLoadMoreHistory}
-                />
-
-                <PromptComposer
-                  disabled={!state.authMode || isThinking}
-                  sending={sending}
-                  thinking={isThinking}
-                  canInterrupt={!!state.activeTurnId}
-                  onSend={handleSend}
-                  onInterrupt={handleInterrupt}
-                />
               </div>
             </>
           )}

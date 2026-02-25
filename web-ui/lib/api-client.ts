@@ -4,6 +4,7 @@ import type {
   CreateThreadRequest,
   CreateThreadResponse,
   FileApprovalDecision,
+  ModelListResponse,
   StartChatgptLoginResponse,
   StartTurnRequest,
   StartTurnResponse,
@@ -66,6 +67,19 @@ export function startChatgptLogin(): Promise<StartChatgptLoginResponse> {
 
 export function readAuthState(): Promise<AuthStateResponse> {
   return request("/v1/auth/state");
+}
+
+export function listModels(query: { limit?: number; includeHidden?: boolean } = {}): Promise<ModelListResponse> {
+  const params = new URLSearchParams();
+  if (query.limit) {
+    params.set("limit", String(query.limit));
+  }
+  if (query.includeHidden) {
+    params.set("includeHidden", "true");
+  }
+
+  const queryString = params.toString();
+  return request(`/v1/models${queryString ? `?${queryString}` : ""}`);
 }
 
 export function listThreads(query: { cursor?: string | null; limit?: number } = {}): Promise<ThreadListResponse> {

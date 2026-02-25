@@ -20,6 +20,10 @@ interface PromptComposerProps {
   sending?: boolean;
   thinking?: boolean;
   canInterrupt?: boolean;
+  modelOptions: Array<{ id: string; label: string }>;
+  selectedModel: string;
+  modelsLoading?: boolean;
+  onModelChange: (model: string) => void;
   onSend: (payload: SendPayload) => Promise<void>;
   onInterrupt: () => Promise<void>;
 }
@@ -46,6 +50,10 @@ export function PromptComposer({
   sending,
   thinking,
   canInterrupt,
+  modelOptions,
+  selectedModel,
+  modelsLoading,
+  onModelChange,
   onSend,
   onInterrupt,
 }: PromptComposerProps) {
@@ -228,9 +236,29 @@ export function PromptComposer({
         </div>
       </div>
 
-      {attachmentError ? <p className="mt-2 text-xs text-rose-700">{attachmentError}</p> : null}
+      <div className="mt-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+        <label htmlFor="model-select" className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+          Model
+        </label>
+        <select
+          id="model-select"
+          value={selectedModel}
+          disabled={disabled || sending || thinking || modelsLoading || modelOptions.length === 0}
+          onChange={(event) => onModelChange(event.target.value)}
+          className="min-h-9 w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs font-medium text-[var(--foreground)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)] disabled:cursor-not-allowed disabled:opacity-50 sm:max-w-[22rem]"
+        >
+          {modelOptions.length === 0 ? (
+            <option value="">No models</option>
+          ) : null}
+          {modelOptions.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.label}
+            </option>
+          ))}
+        </select>
+      </div>
 
-      <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">Enter 전송, Alt/Command + Enter 줄바꿈</p>
+      {attachmentError ? <p className="mt-2 text-xs text-rose-700">{attachmentError}</p> : null}
     </section>
   );
 }
