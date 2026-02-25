@@ -12,7 +12,7 @@ describe("chatReducer", () => {
       type: "apply-ui-event",
       event: {
         type: "agent.delta",
-        payload: { itemId: "item-1", text: "Hello" },
+        payload: { threadId: "thread-1", itemId: "item-1", text: "Hello" },
       },
     });
 
@@ -20,7 +20,7 @@ describe("chatReducer", () => {
       type: "apply-ui-event",
       event: {
         type: "agent.delta",
-        payload: { itemId: "item-1", text: " world" },
+        payload: { threadId: "thread-1", itemId: "item-1", text: " world" },
       },
     });
 
@@ -47,18 +47,56 @@ describe("chatReducer", () => {
     expect(state.commandApprovals[0]?.requestId).toBe("req-1");
   });
 
-  it("sets and clears active turn state", () => {
-    const withActiveTurn = chatReducer(initialChatState, {
-      type: "set-active-turn",
-      threadId: "thread-1",
-      turnId: "turn-1",
+  it("tracks active turns by thread and clears completed thread turn only", () => {
+    const withSelectedThread = chatReducer(initialChatState, {
+      type: "select-thread",
+      threadId: "thread-a",
     });
 
-    expect(withActiveTurn.currentThreadId).toBe("thread-1");
-    expect(withActiveTurn.activeTurnId).toBe("turn-1");
+    const withThreadATurn = chatReducer(withSelectedThread, {
+      type: "set-active-turn",
+      threadId: "thread-a",
+      turnId: "turn-a",
+    });
+    const withThreadBTurn = chatReducer(withThreadATurn, {
+      type: "set-active-turn",
+      threadId: "thread-b",
+      turnId: "turn-b",
+    });
 
-    const cleared = chatReducer(withActiveTurn, { type: "clear-active-turn" });
-    expect(cleared.activeTurnId).toBeNull();
+    expect(withThreadBTurn.activeTurnIdByThreadId["thread-a"]).toBe("turn-a");
+    expect(withThreadBTurn.activeTurnIdByThreadId["thread-b"]).toBe("turn-b");
+    expect(withThreadBTurn.activeTurnId).toBe("turn-a");
+
+    const withThreadACompleted = chatReducer(withThreadBTurn, {
+      type: "apply-ui-event",
+      event: {
+        type: "turn.completed",
+        payload: { threadId: "thread-a", turnId: "turn-a", status: "completed" },
+      },
+    });
+
+    expect(withThreadACompleted.activeTurnIdByThreadId["thread-a"]).toBeUndefined();
+    expect(withThreadACompleted.activeTurnIdByThreadId["thread-b"]).toBe("turn-b");
+    expect(withThreadACompleted.activeTurnId).toBeNull();
+  });
+
+  it("routes assistant delta to its payload threadId even when another thread is selected", () => {
+    const withSelectedThread = chatReducer(initialChatState, {
+      type: "select-thread",
+      threadId: "thread-b",
+    });
+
+    const updated = chatReducer(withSelectedThread, {
+      type: "apply-ui-event",
+      event: {
+        type: "agent.delta",
+        payload: { threadId: "thread-a", itemId: "item-a", text: "from-thread-a" },
+      },
+    });
+
+    expect(updated.messagesByThreadId["thread-a"]?.[0]?.text).toBe("from-thread-a");
+    expect(updated.messagesByThreadId["thread-b"]).toBeUndefined();
   });
 
   it("keeps only the latest 10 threads in state", () => {

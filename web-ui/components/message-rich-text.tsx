@@ -9,13 +9,21 @@ interface MessageRichTextProps {
 export function MessageRichText({ text }: MessageRichTextProps) {
   const segments = useMemo(() => parseMessageSegments(text), [text]);
 
+  // Memoize inline parsing for each segment as well
+  const parsedSegments = useMemo(() => {
+    return segments.map((segment) => ({
+      ...segment,
+      inlineParts: segment.type === "text" ? parseInlineTextParts(segment.content) : null,
+    }));
+  }, [segments]);
+
   if (!segments.length) {
     return null;
   }
 
   return (
     <div className="space-y-2">
-      {segments.map((segment, index) => {
+      {parsedSegments.map((segment, index) => {
         if (segment.type === "code") {
           return (
             <CodeBlock
@@ -27,7 +35,7 @@ export function MessageRichText({ text }: MessageRichTextProps) {
           );
         }
 
-        const inlineParts = parseInlineTextParts(segment.content);
+        const inlineParts = segment.inlineParts!;
 
         return (
           <p key={`text-${index}`} className="whitespace-pre-wrap break-words">

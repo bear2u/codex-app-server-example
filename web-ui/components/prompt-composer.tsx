@@ -1,13 +1,23 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const MAX_IMAGE_ATTACHMENTS = 10;
 const MAX_IMAGE_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_OPTIMIZED_IMAGE_DIMENSION = 1600;
+const JPEG_QUALITY = 0.82;
 
 export interface PromptComposerImageAttachment {
   id: string;
   name: string;
   size: number;
   url: string;
+}
+
+interface PendingImageAttachment {
+  id: string;
+  name: string;
+  size: number;
+  file: File;
+  previewUrl: string;
 }
 
 interface SendPayload {
@@ -28,7 +38,7 @@ interface PromptComposerProps {
   onInterrupt: () => Promise<void>;
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -36,13 +46,71 @@ function readFileAsDataUrl(file: File): Promise<string> {
         resolve(reader.result);
         return;
       }
-      reject(new Error(`Could not read ${file.name}`));
+      reject(new Error("Could not read image blob"));
     };
-    reader.onerror = () => {
-      reject(new Error(`Could not read ${file.name}`));
-    };
-    reader.readAsDataURL(file);
+    reader.onerror = () => reject(new Error("Could not read image blob"));
+    reader.readAsDataURL(blob);
   });
+}
+
+function estimateDataUrlByteSize(dataUrl: string): number {
+  const base64 = dataUrl.split(",")[1] ?? "";
+  return Math.ceil((base64.length * 3) / 4);
+}
+
+function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not decode image"));
+    image.src = url;
+  });
+}
+
+async function optimizeImageToDataUrl(file: File): Promise<{ url: string; size: number }> {
+  // Preserve animation/vector fidelity for gif/svg by skipping canvas conversion.
+  if (file.type === "image/gif" || file.type === "image/svg+xml") {
+    const original = await readBlobAsDataUrl(file);
+    return { url: original, size: file.size };
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = await loadImageFromUrl(objectUrl);
+    const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+    const ratio = longestSide > MAX_OPTIMIZED_IMAGE_DIMENSION ? MAX_OPTIMIZED_IMAGE_DIMENSION / longestSide : 1;
+    const width = Math.max(1, Math.round(image.naturalWidth * ratio));
+    const height = Math.max(1, Math.round(image.naturalHeight * ratio));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      const original = await readBlobAsDataUrl(file);
+      return { url: original, size: file.size };
+    }
+
+    context.drawImage(image, 0, 0, width, height);
+
+    const targetType = file.type === "image/png" ? "image/png" : "image/jpeg";
+    const outputBlob =
+      (await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob(resolve, targetType, targetType === "image/jpeg" ? JPEG_QUALITY : undefined);
+      })) ?? file;
+    const outputDataUrl = await readBlobAsDataUrl(outputBlob);
+
+    // Avoid growing payloads when optimization is ineffective.
+    const optimizedSize = estimateDataUrlByteSize(outputDataUrl);
+    if (optimizedSize >= file.size) {
+      const original = await readBlobAsDataUrl(file);
+      return { url: original, size: file.size };
+    }
+
+    return { url: outputDataUrl, size: optimizedSize };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 export function PromptComposer({
@@ -58,26 +126,73 @@ export function PromptComposer({
   onInterrupt,
 }: PromptComposerProps) {
   const [value, setValue] = useState("");
-  const [attachments, setAttachments] = useState<PromptComposerImageAttachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingImageAttachment[]>([]);
+  const [preparingAttachments, setPreparingAttachments] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [isMobileAdvancedOpen, setIsMobileAdvancedOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const submitDisabled = disabled || sending || thinking || preparingAttachments || (!value.trim() && pendingAttachments.length === 0);
+  const attachDisabled = disabled || sending || thinking || preparingAttachments || pendingAttachments.length >= MAX_IMAGE_ATTACHMENTS;
 
-  const submit = async () => {
-    const text = value.trim();
-    if (disabled || sending || thinking || (!text && attachments.length === 0)) {
-      return;
-    }
+  useEffect(() => {
+    return () => {
+      for (const attachment of pendingAttachments) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
+    };
+  }, [pendingAttachments]);
 
-    setValue("");
-    setAttachments([]);
-    setAttachmentError(null);
-    await onSend({
-      text,
-      attachments,
+  const clearPendingAttachments = () => {
+    setPendingAttachments((prev) => {
+      for (const attachment of prev) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
+      return [];
     });
   };
 
-  const handleSelectImages = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const submit = async () => {
+    const text = value.trim();
+    if (disabled || sending || thinking || preparingAttachments || (!text && pendingAttachments.length === 0)) {
+      return;
+    }
+
+    setAttachmentError(null);
+    setPreparingAttachments(true);
+
+    try {
+      const attachments = await Promise.all(
+        pendingAttachments.map(async (attachment) => {
+          const optimized = await optimizeImageToDataUrl(attachment.file);
+          return {
+            id: attachment.id,
+            name: attachment.name,
+            size: optimized.size,
+            url: optimized.url,
+          };
+        }),
+      );
+
+      if (!text && attachments.length === 0) {
+        return;
+      }
+
+      await onSend({
+        text,
+        attachments,
+      });
+
+      setValue("");
+      clearPendingAttachments();
+      setAttachmentError(null);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "Failed to process image.");
+    } finally {
+      setPreparingAttachments(false);
+    }
+  };
+
+  const handleSelectImages = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = Array.from(event.target.files ?? []);
     event.currentTarget.value = "";
 
@@ -87,49 +202,51 @@ export function PromptComposer({
 
     setAttachmentError(null);
 
-    const remainingSlots = Math.max(MAX_IMAGE_ATTACHMENTS - attachments.length, 0);
+    const remainingSlots = Math.max(MAX_IMAGE_ATTACHMENTS - pendingAttachments.length, 0);
     if (remainingSlots === 0) {
-      setAttachmentError(`이미지는 최대 ${MAX_IMAGE_ATTACHMENTS}개까지 첨부할 수 있습니다.`);
+      setAttachmentError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
       return;
     }
 
     const filesToProcess = selectedFiles.slice(0, remainingSlots);
     if (selectedFiles.length > remainingSlots) {
-      setAttachmentError(`이미지는 최대 ${MAX_IMAGE_ATTACHMENTS}개까지 첨부할 수 있습니다.`);
+      setAttachmentError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`);
     }
 
-    const nextAttachments: PromptComposerImageAttachment[] = [];
+    const nextPendingAttachments: PendingImageAttachment[] = [];
     for (const file of filesToProcess) {
       if (!file.type.startsWith("image/")) {
-        setAttachmentError("이미지 파일만 첨부할 수 있습니다.");
+        setAttachmentError("Only image files can be attached.");
         continue;
       }
 
       if (file.size > MAX_IMAGE_FILE_SIZE_BYTES) {
-        setAttachmentError("이미지 1개당 최대 크기는 5MB입니다.");
+        setAttachmentError("Maximum size per image is 5MB.");
         continue;
       }
 
-      try {
-        const dataUrl = await readFileAsDataUrl(file);
-        nextAttachments.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: file.name,
-          size: file.size,
-          url: dataUrl,
-        });
-      } catch {
-        setAttachmentError(`${file.name} 파일을 읽지 못했습니다.`);
-      }
+      nextPendingAttachments.push({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: file.name,
+        size: file.size,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      });
     }
 
-    if (nextAttachments.length) {
-      setAttachments((prev) => [...prev, ...nextAttachments]);
+    if (nextPendingAttachments.length) {
+      setPendingAttachments((prev) => [...prev, ...nextPendingAttachments]);
     }
   };
 
   const handleRemoveAttachment = (id: string) => {
-    setAttachments((prev) => prev.filter((item) => item.id !== id));
+    setPendingAttachments((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return prev.filter((item) => item.id !== id);
+    });
   };
 
   const handlePromptKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -151,114 +268,172 @@ export function PromptComposer({
     void submit();
   };
 
-  return (
-    <section className="rounded-xl border border-[var(--border)] bg-[var(--panel)] p-3 sm:p-4">
-      <label htmlFor="prompt-input" className="mb-2 block text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-        Prompt
-      </label>
+  const handleCompactPromptKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") {
+      return;
+    }
 
-      {attachments.length ? (
-        <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
-          {attachments.map((attachment) => (
-            <div
-              key={attachment.id}
-              className="relative h-24 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)]"
+    if (event.nativeEvent.isComposing) {
+      return;
+    }
+
+    event.preventDefault();
+    void submit();
+  };
+
+  return (
+    <section className="safe-bottom-pad rounded-xl border border-[var(--border)] bg-[var(--panel)] p-3 sm:p-4">
+      {!isMobileAdvancedOpen ? (
+        <div className="md:hidden">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              onKeyDown={handleCompactPromptKeyDown}
+              placeholder="Chat with Codex..."
+              className="min-h-11 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition-colors duration-200 focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)]"
+            />
+            <button
+              type="button"
+              disabled={submitDisabled}
+              onClick={() => void submit()}
+              className="min-h-11 rounded-lg bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-foreground)] transition-colors duration-200 hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={attachment.url} alt={attachment.name} className="h-full w-full object-cover" />
-              <div className="absolute inset-x-0 bottom-0 bg-black/60 px-2 py-1 text-[10px] text-white">
-                <p className="truncate">{attachment.name}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleRemoveAttachment(attachment.id)}
-                className="absolute right-1 top-1 inline-flex min-h-8 items-center rounded bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-black/80"
-              >
-                Remove
-              </button>
-            </div>
-          ))}
+              {preparingAttachments ? "Preparing..." : sending ? "Sending..." : thinking ? "Generating..." : "Send"}
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsMobileAdvancedOpen(true)}
+            className="mt-2 min-h-10 text-xs font-semibold uppercase tracking-wide text-[var(--accent)] underline underline-offset-2"
+          >
+            Advance
+          </button>
         </div>
       ) : null}
 
-      <textarea
-        id="prompt-input"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        onKeyDown={handlePromptKeyDown}
-        rows={3}
-        placeholder="Ask Codex to inspect, edit, or review your project..."
-        className="w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition-colors duration-200 focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)]"
-      />
+      <div className={`${isMobileAdvancedOpen ? "block" : "hidden"} md:block`}>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <label htmlFor="prompt-input" className="block text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+            Prompt
+          </label>
+          <button
+            type="button"
+            onClick={() => setIsMobileAdvancedOpen(false)}
+            className="min-h-10 text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)] underline underline-offset-2 md:hidden"
+          >
+            Compact
+          </button>
+        </div>
 
-      <div className="mt-3 flex flex-wrap items-start gap-2 sm:items-center">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(event) => {
-            void handleSelectImages(event);
-          }}
+        {pendingAttachments.length ? (
+          <div className="mb-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+            {pendingAttachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                className="relative h-24 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)]"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
+                <div className="absolute inset-x-0 bottom-0 bg-black/60 px-2 py-1 text-[10px] text-white">
+                  <p className="truncate">{attachment.name}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveAttachment(attachment.id)}
+                  className="absolute right-1 top-1 inline-flex min-h-8 min-w-8 items-center justify-center rounded bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-black/80"
+                  aria-label={`Remove ${attachment.name}`}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <textarea
+          id="prompt-input"
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={handlePromptKeyDown}
+          rows={3}
+          placeholder="Ask Codex to inspect, edit, or review your project..."
+          className="w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-sm text-[var(--foreground)] outline-none transition-colors duration-200 focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)]"
         />
 
-        <button
-          type="button"
-          disabled={disabled || sending || thinking || attachments.length >= MAX_IMAGE_ATTACHMENTS}
-          onClick={() => fileInputRef.current?.click()}
-          className="cursor-pointer rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] transition-colors duration-200 hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          이미지 첨부
-        </button>
-        <span className="text-xs text-[var(--muted-foreground)]">
-          {attachments.length}/{MAX_IMAGE_ATTACHMENTS}
-        </span>
-
-        <div className="flex w-full justify-end gap-2 sm:ml-auto sm:w-auto">
-          <button
-            type="button"
-            disabled={disabled || sending || thinking || (!value.trim() && attachments.length === 0)}
-            onClick={() => void submit()}
-            className="cursor-pointer rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-[var(--accent-foreground)] transition-colors duration-200 hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {sending ? "Sending..." : thinking ? "Generating..." : "Send"}
-          </button>
+        <div className="mt-3 flex flex-wrap items-start gap-2 sm:items-center">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={handleSelectImages}
+          />
 
           <button
             type="button"
-            disabled={!canInterrupt}
-            onClick={() => void onInterrupt()}
-            className="cursor-pointer rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm font-semibold text-[var(--foreground)] transition-colors duration-200 hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={attachDisabled}
+            onClick={() => fileInputRef.current?.click()}
+            className="cursor-pointer rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] transition-colors duration-200 hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+            aria-label="Attach images"
           >
-            Stop
+            Attach Images
           </button>
+          <span className="text-xs text-[var(--muted-foreground)]">
+            {pendingAttachments.length}/{MAX_IMAGE_ATTACHMENTS}
+          </span>
+
+          <div className="flex w-full justify-end gap-2 sm:ml-auto sm:w-auto">
+            <button
+              type="button"
+              disabled={submitDisabled}
+              onClick={() => void submit()}
+              className="cursor-pointer rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-[var(--accent-foreground)] transition-colors duration-200 hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {preparingAttachments ? "Preparing..." : sending ? "Sending..." : thinking ? "Generating..." : "Send"}
+            </button>
+
+            <button
+              type="button"
+              disabled={!canInterrupt}
+              onClick={() => void onInterrupt()}
+              className="cursor-pointer rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm font-semibold text-[var(--foreground)] transition-colors duration-200 hover:bg-[var(--panel-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Stop
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+          <label htmlFor="model-select" className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
+            Model
+          </label>
+          <select
+            id="model-select"
+            value={selectedModel}
+            disabled={disabled || sending || thinking || preparingAttachments || modelsLoading || modelOptions.length === 0}
+            onChange={(event) => onModelChange(event.target.value)}
+            className="min-h-9 w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs font-medium text-[var(--foreground)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)] disabled:cursor-not-allowed disabled:opacity-50 sm:max-w-[22rem]"
+          >
+            {modelOptions.length === 0 ? (
+              <option value="">No models</option>
+            ) : null}
+            {modelOptions.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
-      <div className="mt-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-        <label htmlFor="model-select" className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-          Model
-        </label>
-        <select
-          id="model-select"
-          value={selectedModel}
-          disabled={disabled || sending || thinking || modelsLoading || modelOptions.length === 0}
-          onChange={(event) => onModelChange(event.target.value)}
-          className="min-h-9 w-full rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-xs font-medium text-[var(--foreground)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--focus)] disabled:cursor-not-allowed disabled:opacity-50 sm:max-w-[22rem]"
-        >
-          {modelOptions.length === 0 ? (
-            <option value="">No models</option>
-          ) : null}
-          {modelOptions.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {attachmentError ? <p className="mt-2 text-xs text-rose-700">{attachmentError}</p> : null}
+      {attachmentError ? (
+        <p className="mt-2 text-xs text-rose-700" role="status" aria-live="polite">
+          {attachmentError}
+        </p>
+      ) : null}
     </section>
   );
 }

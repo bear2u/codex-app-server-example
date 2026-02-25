@@ -82,6 +82,14 @@ export function ThreadSidebar({
           );
         })}
       </div>
+
+      <a
+        href="/settings"
+        onClick={() => onCloseMobile?.()}
+        className="mt-3 inline-flex min-h-11 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 py-2 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
+      >
+        Settings
+      </a>
     </aside>
   );
 }

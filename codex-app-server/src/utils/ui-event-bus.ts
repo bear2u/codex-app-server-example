@@ -60,6 +60,7 @@ export class UiEventBus {
     response.writeHead(200, headers);
 
     response.write(": connected\n\n");
+    response.write(`event: heartbeat\ndata: {"ts":${Date.now()}}\n\n`);
 
     if (lastEventId) {
       const marker = Number(lastEventId);
@@ -73,7 +74,7 @@ export class UiEventBus {
     }
 
     const heartbeat = setInterval(() => {
-      response.write(`: heartbeat ${Date.now()}\n\n`);
+      response.write(`event: heartbeat\ndata: {"ts":${Date.now()}}\n\n`);
     }, this.heartbeatMs);
 
     const client: SseClient = { id: clientId, response, heartbeat };

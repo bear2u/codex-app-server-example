@@ -9,3 +9,4 @@ coverage
 !.env.example
 .DS_Store
 .turbo
+app-server-original

@@ -167,3 +167,37 @@ export interface MessageSourcePayload {
   itemId: string;
   sources: SourceRef[];
 }
+
+export type TunnelStatus = "off" | "starting" | "on" | "error";
+
+export interface TunnelAdminStateResponse {
+  canManage: boolean;
+  status: TunnelStatus;
+  publicUrl: string | null;
+  externalIp: string | null;
+  hasPassword: boolean;
+  lastError: string | null;
+}
+
+export interface EnableTunnelRequest {
+  password: string;
+}
+
+export interface EnableTunnelResponse {
+  status: "starting" | "on";
+  publicUrl: string | null;
+}
+
+export interface DisableTunnelResponse {
+  status: "off";
+}
+
+export interface TunnelPublicLoginRequest {
+  password: string;
+  next?: string;
+}
+
+export interface TunnelPublicLoginResponse {
+  ok: true;
+  redirectTo: string;
+}

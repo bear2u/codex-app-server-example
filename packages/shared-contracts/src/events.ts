@@ -15,12 +15,12 @@ export type UiEvent =
   | { type: "auth.updated"; payload: { authMode: string | null } }
   | { type: "thread.started"; payload: { threadId: string } }
   | { type: "turn.started"; payload: { threadId: string; turnId: string } }
-  | { type: "agent.delta"; payload: { itemId: string; text: string } }
-  | { type: "reasoning.delta"; payload: { itemId: string; text: string } }
-  | { type: "sources.updated"; payload: { itemId: string; sources: SourceRef[] } }
+  | { type: "agent.delta"; payload: { threadId: string; itemId: string; text: string } }
+  | { type: "reasoning.delta"; payload: { threadId: string; itemId: string; text: string } }
+  | { type: "sources.updated"; payload: { threadId: string; itemId: string; sources: SourceRef[] } }
   | {
       type: "tool.status";
-      payload: { itemId: string; tool: string; status: ToolStatus; detail?: string };
+      payload: { threadId: string; itemId: string; tool: string; status: ToolStatus; detail?: string };
     }
   | { type: "approval.command.requested"; payload: CommandApprovalPayload }
   | { type: "approval.filechange.requested"; payload: FileApprovalPayload }

@@ -10,12 +10,33 @@ import { registerApprovalRoutes } from "./routes/approvals";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerEventRoutes } from "./routes/events";
 import { registerThreadRoutes } from "./routes/threads";
+import { registerTunnelRoutes } from "./routes/tunnel";
 import { registerTurnRoutes } from "./routes/turns";
 import { ApprovalService } from "./services/approval-service";
 import { AuthService } from "./services/auth-service";
 import { ThreadService } from "./services/thread-service";
+import { TunnelService } from "./services/tunnel-service";
 import { TurnService } from "./services/turn-service";
 import { UiEventBus } from "./utils/ui-event-bus";
+
+function isAllowedTunnelOrigin(origin: string, env: Env): boolean {
+  try {
+    const originUrl = new URL(origin);
+    const providerUrl = new URL(env.tunnelProviderHost);
+    const originHost = originUrl.hostname.toLowerCase();
+    const providerHost = providerUrl.hostname.toLowerCase();
+    const isNgrokHost =
+      originHost.endsWith(".ngrok.app") ||
+      originHost.endsWith(".ngrok-free.app") ||
+      originHost.endsWith(".ngrok.dev") ||
+      originHost.endsWith(".ngrok.io");
+    const tunnelCommand = env.tunnelCommand.trim().toLowerCase();
+
+    return originHost === providerHost || originHost.endsWith(`.${providerHost}`) || tunnelCommand === "ngrok" && isNgrokHost;
+  } catch {
+    return false;
+  }
+}
 
 export async function createApp(env: Env) {
   const app = Fastify({
@@ -27,8 +48,9 @@ export async function createApp(env: Env) {
 
   await app.register(cors, {
     origin: (origin, callback) => {
-      // Allow requests without Origin (curl, server-side checks) and configured browser origins.
-      if (!origin || env.corsOrigins.includes(origin)) {
+      // Allow requests without Origin (curl, server-side checks),
+      // configured browser origins, and dynamic tunnel subdomains.
+      if (!origin || env.corsOrigins.includes(origin) || isAllowedTunnelOrigin(origin, env)) {
         callback(null, true);
         return;
       }
@@ -52,6 +74,7 @@ export async function createApp(env: Env) {
   const authService = new AuthService(rpc);
   const threadService = new ThreadService(rpc, env);
   const turnService = new TurnService(rpc, env);
+  const tunnelService = new TunnelService(env, app.log);
   const approvalService = new ApprovalService(rpc, eventBus, app.log);
   approvalService.start();
 
@@ -60,6 +83,7 @@ export async function createApp(env: Env) {
   registerTurnRoutes(app, turnService);
   registerApprovalRoutes(app, approvalService);
   registerEventRoutes(app, eventBus);
+  registerTunnelRoutes(app, tunnelService);
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
@@ -90,6 +114,7 @@ export async function createApp(env: Env) {
 
   app.addHook("onClose", async () => {
     eventBus.close();
+    await tunnelService.shutdown();
     await rpc.close();
   });
 

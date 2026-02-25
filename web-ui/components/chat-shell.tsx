@@ -70,13 +70,13 @@ function summarizeUiEvent(event: UiEvent): { message: string; detail?: string; l
     case "tool.status":
       return {
         message: "tool.status",
-        detail: `itemId=${event.payload.itemId} tool=${event.payload.tool} status=${event.payload.status}`,
+        detail: `threadId=${event.payload.threadId} itemId=${event.payload.itemId} tool=${event.payload.tool} status=${event.payload.status}`,
         level: event.payload.status === "failed" ? "error" : "info",
       };
     case "sources.updated":
       return {
         message: "sources.updated",
-        detail: `itemId=${event.payload.itemId} count=${event.payload.sources.length}`,
+        detail: `threadId=${event.payload.threadId} itemId=${event.payload.itemId} count=${event.payload.sources.length}`,
         level: "info",
       };
     case "approval.command.requested":
@@ -94,13 +94,13 @@ function summarizeUiEvent(event: UiEvent): { message: string; detail?: string; l
     case "agent.delta":
       return {
         message: "agent.delta",
-        detail: `itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
+        detail: `threadId=${event.payload.threadId} itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
         level: "info",
       };
     case "reasoning.delta":
       return {
         message: "reasoning.delta",
-        detail: `itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
+        detail: `threadId=${event.payload.threadId} itemId=${event.payload.itemId} chars=${event.payload.text.length}`,
         level: "info",
       };
     case "error":
@@ -122,8 +122,8 @@ export function ChatShell() {
   const [serverConnection, setServerConnection] = useState<"connecting" | "connected" | "reconnecting">(
     "connecting",
   );
-  const [sending, setSending] = useState(false);
-  const [isAwaitingAssistant, setIsAwaitingAssistant] = useState(false);
+  const [sendingByThreadId, setSendingByThreadId] = useState<Record<string, boolean>>({});
+  const [awaitingAssistantByThreadId, setAwaitingAssistantByThreadId] = useState<Record<string, boolean>>({});
   const [loadingThreadHistoryId, setLoadingThreadHistoryId] = useState<string | null>(null);
   const [loadingMoreHistoryThreadId, setLoadingMoreHistoryThreadId] = useState<string | null>(null);
   const [threadCopyStatus, setThreadCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
@@ -350,13 +350,26 @@ export function ChatShell() {
         if (mounted) {
           setStreamDisconnected(false);
           setServerConnection("connected");
-          if (event.type === "agent.delta" || event.type === "turn.completed" || event.type === "error") {
-            setIsAwaitingAssistant(false);
+          if (event.type === "agent.delta") {
+            setAwaitingAssistantByThreadId((prev) => ({
+              ...prev,
+              [event.payload.threadId]: false,
+            }));
+          }
+          if (event.type === "turn.completed") {
+            setAwaitingAssistantByThreadId((prev) => ({
+              ...prev,
+              [event.payload.threadId]: false,
+            }));
+            setSendingByThreadId((prev) => ({
+              ...prev,
+              [event.payload.threadId]: false,
+            }));
           }
         }
 
         if (event.type === "agent.delta" || event.type === "reasoning.delta") {
-          const streamKey = `${event.type}:${event.payload.itemId}`;
+          const streamKey = `${event.type}:${event.payload.threadId}:${event.payload.itemId}`;
           if (!streamDeltaSeenRef.current.has(streamKey)) {
             streamDeltaSeenRef.current.add(streamKey);
             const summary = summarizeUiEvent(event);
@@ -423,8 +436,27 @@ export function ChatShell() {
   const normalizedCurrentWorkspace = normalizeCwd(currentThreadWorkspace) ?? "";
   const hasWorkspaceChanges = normalizedWorkspaceDraft !== normalizedCurrentWorkspace;
 
-  const toolStatuses = useMemo(() => Object.values(state.toolStatusesByItemId), [state.toolStatusesByItemId]);
-  const isThinking = sending || isAwaitingAssistant || !!state.activeTurnId;
+  const currentActiveTurnId = currentThreadId ? (state.activeTurnIdByThreadId[currentThreadId] ?? null) : null;
+  const currentThreadSending = currentThreadId ? !!sendingByThreadId[currentThreadId] : false;
+  const currentThreadAwaitingAssistant = currentThreadId ? !!awaitingAssistantByThreadId[currentThreadId] : false;
+  const toolStatuses = useMemo(
+    () =>
+      Object.values(state.toolStatusesByItemId).filter((status) =>
+        currentThreadId ? status.threadId === currentThreadId : true,
+      ),
+    [state.toolStatusesByItemId, currentThreadId],
+  );
+  const isThinking = currentThreadSending || currentThreadAwaitingAssistant || !!currentActiveTurnId;
+  const liveStatusText = useMemo(() => {
+    const stream =
+      serverConnection === "connected"
+        ? "Connected"
+        : serverConnection === "reconnecting"
+          ? "Reconnecting"
+          : "Connecting";
+    const thinking = isThinking ? "Assistant is generating a response." : "Assistant is idle.";
+    return `Connection: ${stream}. ${thinking}`;
+  }, [isThinking, serverConnection]);
 
   const resolveThreadCwd = (threadId: string | null): string | undefined => {
     if (!threadId) {
@@ -613,8 +645,7 @@ export function ChatShell() {
     attachments: PromptComposerImageAttachment[];
   }) => {
     setError(null);
-    setSending(true);
-    setIsAwaitingAssistant(true);
+    let targetThreadId: string | null = null;
 
     try {
       const normalizedText = text.trim();
@@ -626,11 +657,13 @@ export function ChatShell() {
         input.push(...attachments.map((attachment) => ({ type: "image" as const, url: attachment.url })));
       }
       if (!input.length) {
-        setIsAwaitingAssistant(false);
         return;
       }
 
       const threadId = await ensureThread();
+      targetThreadId = threadId;
+      setSendingByThreadId((prev) => ({ ...prev, [threadId]: true }));
+      setAwaitingAssistantByThreadId((prev) => ({ ...prev, [threadId]: true }));
       dispatch({
         type: "append-user-message",
         threadId,
@@ -660,8 +693,11 @@ export function ChatShell() {
       });
     } catch (sendError) {
       setError(sendError instanceof Error ? sendError.message : "Failed to start turn");
-      setIsAwaitingAssistant(false);
-      dispatch({ type: "clear-active-turn" });
+      if (targetThreadId) {
+        const threadId = targetThreadId;
+        setAwaitingAssistantByThreadId((prev) => ({ ...prev, [threadId]: false }));
+        dispatch({ type: "clear-active-turn", threadId });
+      }
       appendLog({
         source: "network",
         level: "error",
@@ -669,24 +705,28 @@ export function ChatShell() {
         detail: sendError instanceof Error ? sendError.message : "Unknown error",
       });
     } finally {
-      setSending(false);
+      if (targetThreadId) {
+        const threadId = targetThreadId;
+        setSendingByThreadId((prev) => ({ ...prev, [threadId]: false }));
+      }
     }
   };
 
   const handleInterrupt = async () => {
-    if (!state.currentThreadId || !state.activeTurnId) {
+    if (!state.currentThreadId || !currentActiveTurnId) {
       return;
     }
 
     try {
-      await interruptTurn(state.currentThreadId, state.activeTurnId);
-      dispatch({ type: "clear-active-turn" });
-      setIsAwaitingAssistant(false);
+      await interruptTurn(state.currentThreadId, currentActiveTurnId);
+      dispatch({ type: "clear-active-turn", threadId: state.currentThreadId });
+      setAwaitingAssistantByThreadId((prev) => ({ ...prev, [state.currentThreadId!]: false }));
+      setSendingByThreadId((prev) => ({ ...prev, [state.currentThreadId!]: false }));
       appendLog({
         source: "ui",
         level: "warn",
         message: "turn interrupted",
-        detail: `threadId=${state.currentThreadId} turnId=${state.activeTurnId}`,
+        detail: `threadId=${state.currentThreadId} turnId=${currentActiveTurnId}`,
       });
     } catch (interruptError) {
       setError(interruptError instanceof Error ? interruptError.message : "Failed to stop turn");
@@ -781,7 +821,10 @@ export function ChatShell() {
   };
 
   return (
-    <main className="min-h-dvh w-full bg-[radial-gradient(circle_at_top_right,var(--sky-soft),transparent_40%),radial-gradient(circle_at_bottom_left,var(--teal-soft),transparent_35%),var(--background)] p-2 text-[var(--foreground)] sm:p-4">
+    <main
+      className="min-h-dvh w-full bg-[radial-gradient(circle_at_top_right,var(--sky-soft),transparent_40%),radial-gradient(circle_at_bottom_left,var(--teal-soft),transparent_35%),var(--background)] p-2 text-[var(--foreground)] sm:p-4"
+      style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.5rem)" }}
+    >
       <div className="mx-auto flex h-[calc(100dvh-1rem)] max-w-[1440px] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--background)] shadow-xl sm:h-[calc(100dvh-2rem)]">
         <div
           aria-hidden={!isSidebarOpen}
@@ -829,6 +872,9 @@ export function ChatShell() {
         </div>
 
         <section className="relative flex min-w-0 flex-1 flex-col p-3 md:p-6">
+          <p className="sr-only" role="status" aria-live="polite">
+            {liveStatusText}
+          </p>
           {!isHeaderCollapsed ? (
             <header className="mb-3 rounded-2xl border border-[var(--border)] bg-[var(--panel)]/90 p-3 shadow-sm md:mb-4 md:p-4">
               <div className="flex flex-wrap items-start gap-2 sm:items-center sm:justify-between">
@@ -892,7 +938,7 @@ export function ChatShell() {
                     onClick={() => setIsHeaderCollapsed(true)}
                     className="inline-flex min-h-10 items-center rounded-lg border border-[var(--border)] bg-[var(--panel)] px-3 text-sm font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--panel-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
                   >
-                    접기
+                    Collapse
                   </button>
                 </div>
               </div>
@@ -961,7 +1007,7 @@ export function ChatShell() {
                 </div>
               ) : (
                 <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel-strong)]/50 px-3 py-2 text-xs text-[var(--muted-foreground)]">
-                  선택된 스레드가 없습니다.
+                  No thread selected.
                 </div>
               )}
             </header>
@@ -974,7 +1020,7 @@ export function ChatShell() {
                 onClick={() => setIsHeaderCollapsed(false)}
                 className="pointer-events-auto inline-flex min-h-10 items-center rounded-lg border border-[var(--accent)] bg-[var(--accent)] px-3 text-sm font-semibold text-[var(--accent-foreground)] transition-colors hover:bg-[var(--accent-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"
               >
-                펼치기
+                Expand
               </button>
             </div>
           ) : null}
@@ -1012,6 +1058,8 @@ export function ChatShell() {
                   ) : null}
 
                   <MessageList
+                    key={currentThreadId ?? "no-thread"}
+                    threadId={currentThreadId}
                     messages={currentMessages}
                     reasoningByItemId={state.reasoningByItemId}
                     sourcesByItemId={state.sourcesByItemId}
@@ -1024,9 +1072,9 @@ export function ChatShell() {
 
                   <PromptComposer
                     disabled={!state.authMode || isThinking}
-                    sending={sending}
+                    sending={currentThreadSending}
                     thinking={isThinking}
-                    canInterrupt={!!state.activeTurnId}
+                    canInterrupt={!!currentActiveTurnId}
                     modelOptions={modelOptions}
                     selectedModel={selectedModel}
                     modelsLoading={modelsLoading}

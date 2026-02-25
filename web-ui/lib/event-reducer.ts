@@ -17,6 +17,7 @@ export interface ChatMessage {
 }
 
 export interface ToolStatusView {
+  threadId: string;
   itemId: string;
   tool: string;
   status: "inProgress" | "completed" | "failed";
@@ -27,6 +28,7 @@ export interface ChatState {
   authMode: string | null;
   currentThreadId: string | null;
   activeTurnId: string | null;
+  activeTurnIdByThreadId: Record<string, string>;
   threads: ThreadSummary[];
   messagesByThreadId: Record<string, ChatMessage[]>;
   assistantMessageIdByItemId: Record<string, string>;
@@ -56,7 +58,7 @@ export type ChatAction =
     }
   | { type: "select-thread"; threadId: string }
   | { type: "set-active-turn"; threadId: string; turnId: string }
-  | { type: "clear-active-turn" }
+  | { type: "clear-active-turn"; threadId?: string }
   | { type: "append-user-message"; threadId: string; text: string; attachments?: ThreadHistoryAttachment[] }
   | { type: "apply-ui-event"; event: UiEvent }
   | { type: "consume-command-approval"; requestId: string }
@@ -66,6 +68,7 @@ export const initialChatState: ChatState = {
   authMode: null,
   currentThreadId: null,
   activeTurnId: null,
+  activeTurnIdByThreadId: {},
   threads: [],
   messagesByThreadId: {},
   assistantMessageIdByItemId: {},
@@ -85,11 +88,15 @@ function limitRecentThreads(threads: ThreadSummary[]): ThreadSummary[] {
   return threads.slice(0, MAX_VISIBLE_THREADS);
 }
 
-function buildAssistantMap(messages: ChatMessage[]): Record<string, string> {
+function toItemThreadKey(threadId: string, itemId: string): string {
+  return `${threadId}:${itemId}`;
+}
+
+function buildAssistantMap(messages: ChatMessage[], threadId: string): Record<string, string> {
   const map: Record<string, string> = {};
   for (const message of messages) {
     if (message.role === "assistant" && message.itemId) {
-      map[message.itemId] = message.id;
+      map[toItemThreadKey(threadId, message.itemId)] = message.id;
     }
   }
   return map;
@@ -114,29 +121,50 @@ function mergeUniqueMessages(olderMessages: ChatMessage[], currentMessages: Chat
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "hydrate-threads": {
+      const currentThreadId = state.currentThreadId ?? action.threads[0]?.id ?? null;
       return {
         ...state,
         threads: limitRecentThreads(action.threads),
-        currentThreadId: state.currentThreadId ?? action.threads[0]?.id ?? null,
+        currentThreadId,
+        activeTurnId: currentThreadId ? (state.activeTurnIdByThreadId[currentThreadId] ?? null) : null,
       };
     }
     case "select-thread": {
       return {
         ...state,
         currentThreadId: action.threadId,
+        activeTurnId: state.activeTurnIdByThreadId[action.threadId] ?? null,
       };
     }
     case "set-active-turn": {
       return {
         ...state,
-        currentThreadId: action.threadId,
-        activeTurnId: action.turnId,
+        activeTurnIdByThreadId: {
+          ...state.activeTurnIdByThreadId,
+          [action.threadId]: action.turnId,
+        },
+        activeTurnId:
+          state.currentThreadId === action.threadId || !state.currentThreadId
+            ? action.turnId
+            : state.activeTurnId,
       };
     }
     case "clear-active-turn": {
+      const targetThreadId = action.threadId ?? state.currentThreadId;
+      if (!targetThreadId) {
+        return {
+          ...state,
+          activeTurnId: null,
+        };
+      }
+
+      const nextActiveTurnByThreadId = { ...state.activeTurnIdByThreadId };
+      delete nextActiveTurnByThreadId[targetThreadId];
+
       return {
         ...state,
-        activeTurnId: null,
+        activeTurnIdByThreadId: nextActiveTurnByThreadId,
+        activeTurnId: state.currentThreadId ? (nextActiveTurnByThreadId[state.currentThreadId] ?? null) : null,
       };
     }
     case "replace-thread-history-page": {
@@ -149,7 +177,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         },
         assistantMessageIdByItemId: {
           ...state.assistantMessageIdByItemId,
-          ...buildAssistantMap(pageMessages),
+          ...buildAssistantMap(pageMessages, action.threadId),
         },
         historyNextCursorByThreadId: {
           ...state.historyNextCursorByThreadId,
@@ -173,7 +201,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         },
         assistantMessageIdByItemId: {
           ...state.assistantMessageIdByItemId,
-          ...buildAssistantMap(action.messages),
+          ...buildAssistantMap(action.messages, action.threadId),
         },
         historyNextCursorByThreadId: {
           ...state.historyNextCursorByThreadId,
@@ -242,16 +270,22 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
       };
     }
     case "turn.started": {
+      const nextActiveTurnByThreadId = {
+        ...state.activeTurnIdByThreadId,
+        [event.payload.threadId]: event.payload.turnId,
+      };
+
       return {
         ...state,
-        currentThreadId: event.payload.threadId,
-        activeTurnId: event.payload.turnId,
+        activeTurnIdByThreadId: nextActiveTurnByThreadId,
+        activeTurnId: state.currentThreadId ? (nextActiveTurnByThreadId[state.currentThreadId] ?? null) : null,
       };
     }
     case "agent.delta": {
-      const threadId = state.currentThreadId ?? "default";
+      const threadId = event.payload.threadId;
       const list = state.messagesByThreadId[threadId] ?? [];
-      const existingMessageId = state.assistantMessageIdByItemId[event.payload.itemId];
+      const itemKey = toItemThreadKey(threadId, event.payload.itemId);
+      const existingMessageId = state.assistantMessageIdByItemId[itemKey];
 
       if (existingMessageId) {
         return {
@@ -275,7 +309,7 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
         ...state,
         assistantMessageIdByItemId: {
           ...state.assistantMessageIdByItemId,
-          [event.payload.itemId]: messageId,
+          [itemKey]: messageId,
         },
         messagesByThreadId: {
           ...state.messagesByThreadId,
@@ -292,28 +326,34 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
         },
       };
     }
-    case "reasoning.delta":
+    case "reasoning.delta": {
+      const reasoningKey = toItemThreadKey(event.payload.threadId, event.payload.itemId);
       return {
         ...state,
         reasoningByItemId: {
           ...state.reasoningByItemId,
-          [event.payload.itemId]: `${state.reasoningByItemId[event.payload.itemId] ?? ""}${event.payload.text}`,
+          [reasoningKey]: `${state.reasoningByItemId[reasoningKey] ?? ""}${event.payload.text}`,
         },
       };
-    case "sources.updated":
+    }
+    case "sources.updated": {
+      const sourceKey = toItemThreadKey(event.payload.threadId, event.payload.itemId);
       return {
         ...state,
         sourcesByItemId: {
           ...state.sourcesByItemId,
-          [event.payload.itemId]: event.payload.sources,
+          [sourceKey]: event.payload.sources,
         },
       };
-    case "tool.status":
+    }
+    case "tool.status": {
+      const toolStatusKey = toItemThreadKey(event.payload.threadId, event.payload.itemId);
       return {
         ...state,
         toolStatusesByItemId: {
           ...state.toolStatusesByItemId,
-          [event.payload.itemId]: {
+          [toolStatusKey]: {
+            threadId: event.payload.threadId,
             itemId: event.payload.itemId,
             tool: event.payload.tool,
             status: event.payload.status,
@@ -321,6 +361,7 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
           },
         },
       };
+    }
     case "approval.command.requested":
       return {
         ...state,
@@ -331,11 +372,15 @@ function applyUiEvent(state: ChatState, event: UiEvent): ChatState {
         ...state,
         fileApprovals: [...state.fileApprovals, event.payload],
       };
-    case "turn.completed":
+    case "turn.completed": {
+      const nextActiveTurnByThreadId = { ...state.activeTurnIdByThreadId };
+      delete nextActiveTurnByThreadId[event.payload.threadId];
       return {
         ...state,
-        activeTurnId: null,
+        activeTurnIdByThreadId: nextActiveTurnByThreadId,
+        activeTurnId: state.currentThreadId ? (nextActiveTurnByThreadId[state.currentThreadId] ?? null) : null,
       };
+    }
     case "error":
       return {
         ...state,

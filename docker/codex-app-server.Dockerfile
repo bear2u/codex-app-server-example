@@ -21,7 +21,18 @@ ENV NODE_ENV=production
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 
-RUN corepack enable && npm install -g @openai/codex@0.104.0
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && mkdir -p /etc/apt/keyrings \
+  && curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+    | gpg --dearmor -o /etc/apt/keyrings/ngrok.gpg \
+  && echo "deb [signed-by=/etc/apt/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com buster main" \
+    > /etc/apt/sources.list.d/ngrok.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends ngrok \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable \
+  && npm install -g @openai/codex@0.104.0
 
 WORKDIR /app
 
@@ -34,4 +45,4 @@ COPY --from=build /app/codex-app-server ./codex-app-server
 
 EXPOSE 4000
 
-CMD ["node", "codex-app-server/dist/main.js"]
+CMD ["pnpm", "--filter", "codex-app-server", "start"]

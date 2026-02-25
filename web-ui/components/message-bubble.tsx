@@ -1,4 +1,5 @@
 /* eslint-disable @next/next/no-img-element */
+import { memo } from "react";
 import type { ChatMessage } from "@/lib/event-reducer";
 import { MessageRichText } from "./message-rich-text";
 
@@ -6,7 +7,7 @@ interface MessageBubbleProps {
   message: ChatMessage;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const attachments = message.attachments ?? [];
   const imageAttachments = attachments.filter((attachment) => attachment.type === "image");
@@ -52,4 +53,4 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       </div>
     </article>
   );
-}
+});

@@ -208,6 +208,8 @@ If a client sends an experimental method or field without opting in, app-server 
 - `thread/unarchive` - restore an archived thread rollout back into the active sessions directory; returns the restored `thread` and emits `thread/unarchived`.
 - `thread/status/changed` - notification emitted when a loaded thread's runtime `status` changes.
 - `thread/compact/start` - trigger conversation history compaction for a thread; returns `{}` immediately while progress streams via `turn/*` and `item/*` notifications.
+- `thread/name/set` - set or update a thread's user-facing name; returns `{}` on success.
+- `thread/backgroundTerminals/clean` - terminate running background terminals for a thread (experimental; requires `capabilities.experimentalApi`); returns `{}` when accepted.
 - `thread/rollback` - drop the last N turns from the in-memory context and persist a rollback marker; returns the updated `thread`.
 - `turn/start` - add user input to a thread and begin Codex generation; responds with the initial `turn` and streams events. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode."
 - `turn/steer` - append user input to the active in-flight turn for a thread; returns the accepted `turnId`.
@@ -218,6 +220,8 @@ If a client sends an experimental method or field without opting in, app-server 
 - `experimentalFeature/list` - list feature flags with lifecycle stage metadata and cursor pagination.
 - `collaborationMode/list` - list collaboration mode presets (experimental, no pagination).
 - `skills/list` - list skills for one or more `cwd` values (supports `forceReload` and optional `perCwdExtraUserRoots`).
+- `skills/remote/list` - list public remote skills (**under development; do not call from production clients yet**).
+- `skills/remote/export` - download a remote skill by `hazelnutId` into `skills` under `codex_home` (**under development; do not call from production clients yet**).
 - `app/list` - list available apps (connectors) with pagination plus accessibility/enabled metadata.
 - `skills/config/write` - enable or disable skills by path.
 - `mcpServer/oauth/login` - start an OAuth login for a configured MCP server; returns an authorization URL and emits `mcpServer/oauthLogin/completed` on completion.
@@ -301,8 +305,10 @@ Use this endpoint to discover feature flags with metadata and lifecycle stage:
 - `thread/list` supports cursor pagination plus `modelProviders`, `sourceKinds`, `archived`, and `cwd` filtering.
 - `thread/loaded/list` returns the thread IDs currently in memory.
 - `thread/archive` moves the thread's persisted JSONL log into the archived directory.
+- `thread/name/set` sets or updates a thread's user-facing name.
 - `thread/unarchive` restores an archived thread rollout back into the active sessions directory.
 - `thread/compact/start` triggers compaction and returns `{}` immediately.
+- `thread/backgroundTerminals/clean` terminates running background terminals for a thread (experimental; requires `capabilities.experimentalApi`).
 - `thread/rollback` drops the last N turns from the in-memory context and records a rollback marker in the thread's persisted JSONL log.
 
 ### Start or resume a thread
@@ -344,6 +350,8 @@ If you mark an enabled MCP server as `required` in config and that server fails 
 
 `dynamicTools` on `thread/start` is an experimental field (requires `capabilities.experimentalApi = true`). Codex persists these dynamic tools in the thread rollout metadata and restores them on `thread/resume` when you don't supply new dynamic tools.
 
+`thread/start`, `thread/resume`, and `thread/fork` also accept experimental `persistExtendedHistory: true` (requires `capabilities.experimentalApi = true`) to persist a richer subset of `ThreadItem`s for less-lossy history when you later call `thread/read`, `thread/resume`, or `thread/fork`.
+
 If you resume with a different model than the one recorded in the rollout, Codex emits a warning and applies a one-time model-switch instruction on the next turn.
 
 To branch from a stored session, call `thread/fork` with the `thread.id`. This creates a new thread id and emits a `thread/started` notification for it:
@@ -356,12 +364,15 @@ To branch from a stored session, call `thread/fork` with the `thread.id`. This c
 
 When a user-facing thread title has been set, app-server hydrates `thread.name` on `thread/list`, `thread/read`, `thread/resume`, `thread/unarchive`, and `thread/rollback` responses. `thread/start` and `thread/fork` may omit `name` (or return `null`) until a title is set later.
 
+`thread/list` and `thread/read` responses can also include `agentNickname` and `agentRole` when the thread is associated with AgentControl-spawned sub-agents.
+
 ### Read a stored thread (without resuming)
 
 Use `thread/read` when you want stored thread data but don't want to resume the thread or subscribe to its events.
 
 - `includeTurns` - when `true`, the response includes the thread's turns; when `false` or omitted, you get the thread summary only.
 - Returned `thread` objects include runtime `status` (`notLoaded`, `idle`, `systemError`, or `active` with `activeFlags`).
+- Returned `thread` objects may include `agentNickname` and `agentRole` for AgentControl-spawned sub-agent threads.
 
 ```json
 { "method": "thread/read", "id": 19, "params": { "threadId": "thr_123", "includeTurns": true } }
@@ -381,6 +392,7 @@ Unlike `thread/resume`, `thread/read` doesn't load the thread into memory or emi
 - `sourceKinds` - restrict results to specific thread sources. When omitted or `[]`, the server defaults to interactive sources only: `cli` and `vscode`.
 - `archived` - when `true`, list archived threads only. When `false` or omitted, list non-archived threads (default).
 - `cwd` - restrict results to threads whose session current working directory exactly matches this path.
+- Responses may include `agentNickname` and `agentRole` for AgentControl-spawned sub-agent threads.
 
 `sourceKinds` accepts the following values:
 
@@ -436,6 +448,17 @@ When `nextCursor` is `null`, you have reached the final page.
 { "method": "thread/loaded/list", "id": 21 }
 { "id": 21, "result": { "data": ["thr_123", "thr_456"] } }
 ```
+
+### Set a thread name
+
+Use `thread/name/set` to set or update the user-facing name for a thread.
+
+```json
+{ "method": "thread/name/set", "id": 23, "params": { "threadId": "thr_123", "name": "Bug bash notes" } }
+{ "id": 23, "result": {} }
+```
+
+Thread names do not need to be unique. Name lookups resolve to the most recently updated matching thread.
 
 ### Archive a thread
 
@@ -588,6 +611,15 @@ Invoke a skill explicitly by including `$<skill-name>` in the text input and add
 ```
 
 On success, the turn finishes with `status: "interrupted"`.
+
+### Clean background terminals
+
+Use `thread/backgroundTerminals/clean` to terminate all running background terminals associated with a thread. This API is experimental and requires `capabilities.experimentalApi = true`.
+
+```json
+{ "method": "thread/backgroundTerminals/clean", "id": 35, "params": { "threadId": "thr_123" } }
+{ "id": 35, "result": {} }
+```
 
 ## Review
 
@@ -845,6 +877,41 @@ Order of messages:
 
 App (connector) tool calls can also require approval. When an app tool call has side effects, the server may elicit approval with `tool/requestUserInput` and options such as **Accept**, **Decline**, and **Cancel**. Destructive tool annotations always trigger approval even when the tool also advertises less-privileged hints. If the user declines or cancels, the related `mcpToolCall` item completes with an error instead of running the tool.
 
+### Dynamic tool calls (experimental)
+
+`dynamicTools` on `thread/start` and the `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
+
+When a dynamic tool is invoked during a turn, the server sends an `item/tool/call` JSON-RPC request to the client:
+
+```json
+{
+  "method": "item/tool/call",
+  "id": 60,
+  "params": {
+    "threadId": "thr_123",
+    "turnId": "turn_123",
+    "callId": "call_123",
+    "tool": "lookup_ticket",
+    "arguments": { "id": "ABC-123" }
+  }
+}
+```
+
+The client must respond with content items. Use `inputText` for text and `inputImage` for image URLs/data URLs:
+
+```json
+{
+  "id": 60,
+  "result": {
+    "contentItems": [
+      { "type": "inputText", "text": "Ticket ABC-123 is open." },
+      { "type": "inputImage", "imageUrl": "data:image/png;base64,AAA" }
+    ],
+    "success": true
+  }
+}
+```
+
 ## Skills
 
 Invoke a skill by including `$<skill-name>` in the user text input. Add a `skill` input item (recommended) so the server injects full skill instructions instead of relying on the model to resolve the name.
@@ -924,6 +991,11 @@ Use `skills/list` to fetch available skills (optionally scoped by `cwds`, with `
   }]
 } }
 ```
+
+Remote skills endpoints are available but currently under development:
+
+- `skills/remote/list` - list public remote skills (**under development; do not call from production clients yet**).
+- `skills/remote/export` - download a remote skill by `hazelnutId` into `skills` under `codex_home` (**under development; do not call from production clients yet**).
 
 To enable or disable a skill by path:
 

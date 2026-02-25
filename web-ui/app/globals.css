@@ -18,6 +18,16 @@ body {
   color: var(--foreground);
 }
 
+.safe-bottom-pad {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 0.75rem);
+}
+
+@media (min-width: 640px) {
+  .safe-bottom-pad {
+    padding-bottom: 1rem;
+  }
+}
+
 a {
   color: inherit;
   text-decoration: none;

@@ -4,6 +4,10 @@ import { UiEventBus } from "../utils/ui-event-bus";
 import { JsonRpcClient } from "./jsonrpc-client";
 
 export class NotificationRouter {
+  private readonly turnIdToThreadId = new Map<string, string>();
+  private readonly itemIdToThreadId = new Map<string, string>();
+  private readonly turnIdToItemIds = new Map<string, Set<string>>();
+
   constructor(
     private readonly rpc: JsonRpcClient,
     private readonly eventBus: UiEventBus,
@@ -41,6 +45,7 @@ export class NotificationRouter {
         if (!threadId || !turnId) {
           return;
         }
+        this.turnIdToThreadId.set(turnId, threadId);
         this.emit({ type: "turn.started", payload: { threadId, turnId } });
         return;
       }
@@ -59,6 +64,15 @@ export class NotificationRouter {
           type: "turn.completed",
           payload: { threadId, turnId, status, error: errorMessage },
         });
+
+        this.turnIdToThreadId.delete(turnId);
+        const itemIds = this.turnIdToItemIds.get(turnId);
+        if (itemIds) {
+          for (const itemId of itemIds) {
+            this.itemIdToThreadId.delete(itemId);
+          }
+          this.turnIdToItemIds.delete(turnId);
+        }
         return;
       }
       case "item/agentMessage/delta": {
@@ -71,7 +85,12 @@ export class NotificationRouter {
         if (!itemId || !text) {
           return;
         }
-        this.emit({ type: "agent.delta", payload: { itemId, text } });
+        const threadId = this.resolveThreadId(params, itemId);
+        if (!threadId) {
+          this.logger.warn({ method, itemId }, "Cannot resolve threadId for agent delta");
+          return;
+        }
+        this.emit({ type: "agent.delta", payload: { threadId, itemId, text } });
         return;
       }
       case "item/reasoning/summaryTextDelta": {
@@ -84,7 +103,12 @@ export class NotificationRouter {
         if (!itemId || !text) {
           return;
         }
-        this.emit({ type: "reasoning.delta", payload: { itemId, text } });
+        const threadId = this.resolveThreadId(params, itemId);
+        if (!threadId) {
+          this.logger.warn({ method, itemId }, "Cannot resolve threadId for reasoning delta");
+          return;
+        }
+        this.emit({ type: "reasoning.delta", payload: { threadId, itemId, text } });
         return;
       }
       case "item/started":
@@ -97,7 +121,33 @@ export class NotificationRouter {
           return;
         }
 
+        const turnId =
+          (item.turnId as string | undefined) ??
+          (params.turnId as string | undefined) ??
+          this.getNestedString(params, ["turn", "id"]);
+        const threadId =
+          (item.threadId as string | undefined) ??
+          (params.threadId as string | undefined) ??
+          (turnId ? this.turnIdToThreadId.get(turnId) : undefined);
+
+        if (turnId && threadId) {
+          this.turnIdToThreadId.set(turnId, threadId);
+        }
+
+        if (threadId) {
+          this.itemIdToThreadId.set(itemId, threadId);
+        }
+        if (turnId) {
+          const ids = this.turnIdToItemIds.get(turnId) ?? new Set<string>();
+          ids.add(itemId);
+          this.turnIdToItemIds.set(turnId, ids);
+        }
+
         if (itemType === "commandExecution") {
+          if (!threadId) {
+            this.logger.warn({ method, itemId }, "Cannot resolve threadId for commandExecution status");
+            return;
+          }
           const commandLabel = this.toCommandLabel(item.command);
           const completedStatus = typeof item.status === "string" ? item.status : undefined;
           const resultStatus =
@@ -107,6 +157,7 @@ export class NotificationRouter {
           this.emit({
             type: "tool.status",
             payload: {
+              threadId,
               itemId,
               tool: commandLabel ? `command:${commandLabel}` : "command",
               status: resultStatus,
@@ -116,11 +167,16 @@ export class NotificationRouter {
         }
 
         if (itemType === "mcpToolCall") {
+          if (!threadId) {
+            this.logger.warn({ method, itemId }, "Cannot resolve threadId for mcpToolCall status");
+            return;
+          }
           const tool = String(item.tool ?? "mcpTool");
           const resultStatus = method === "item/completed" && item.status === "failed" ? "failed" : status;
           this.emit({
             type: "tool.status",
             payload: {
+              threadId,
               itemId,
               tool,
               status: resultStatus,
@@ -130,6 +186,10 @@ export class NotificationRouter {
         }
 
         if (itemType === "webSearch" && method === "item/completed") {
+          if (!threadId) {
+            this.logger.warn({ method, itemId }, "Cannot resolve threadId for webSearch sources");
+            return;
+          }
           const query = (item.query as string | undefined) ?? "Search";
           const sources: SourceRef[] = [
             {
@@ -137,7 +197,7 @@ export class NotificationRouter {
               provider: "webSearch",
             },
           ];
-          this.emit({ type: "sources.updated", payload: { itemId, sources } });
+          this.emit({ type: "sources.updated", payload: { threadId, itemId, sources } });
         }
         return;
       }
@@ -148,6 +208,38 @@ export class NotificationRouter {
 
   private emit(event: UiEvent): void {
     this.eventBus.publish(event);
+  }
+
+  private resolveThreadId(params: Record<string, unknown>, itemId: string): string | undefined {
+    const byParams =
+      (params.threadId as string | undefined) ??
+      this.getNestedString(params, ["turn", "threadId"]) ??
+      this.getNestedString(params, ["item", "threadId"]);
+    if (byParams) {
+      this.itemIdToThreadId.set(itemId, byParams);
+      return byParams;
+    }
+
+    const byItemCache = this.itemIdToThreadId.get(itemId);
+    if (byItemCache) {
+      return byItemCache;
+    }
+
+    const turnId =
+      (params.turnId as string | undefined) ??
+      this.getNestedString(params, ["turn", "id"]) ??
+      this.getNestedString(params, ["item", "turnId"]);
+    if (!turnId) {
+      return undefined;
+    }
+
+    const byTurnCache = this.turnIdToThreadId.get(turnId);
+    if (byTurnCache) {
+      this.itemIdToThreadId.set(itemId, byTurnCache);
+      return byTurnCache;
+    }
+
+    return undefined;
   }
 
   private getNestedString(value: Record<string, unknown>, path: string[]): string | undefined {

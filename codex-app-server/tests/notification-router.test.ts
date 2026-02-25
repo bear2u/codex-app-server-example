@@ -30,12 +30,12 @@ describe("NotificationRouter", () => {
 
     rpc.emit("notification", {
       method: "item/agentMessage/delta",
-      params: { itemId: "item-1", delta: "hello" },
+      params: { itemId: "item-1", delta: "hello", threadId: "thread-1" },
     });
 
     expect(publish).toHaveBeenCalledWith({
       type: "agent.delta",
-      payload: { itemId: "item-1", text: "hello" },
+      payload: { threadId: "thread-1", itemId: "item-1", text: "hello" },
     });
   });
 
@@ -87,6 +87,7 @@ describe("NotificationRouter", () => {
           id: "item-cmd-1",
           type: "commandExecution",
           command: "npm run build",
+          threadId: "thread-1",
         },
       },
     });
@@ -94,6 +95,7 @@ describe("NotificationRouter", () => {
     expect(publish).toHaveBeenCalledWith({
       type: "tool.status",
       payload: {
+        threadId: "thread-1",
         itemId: "item-cmd-1",
         tool: "command:npm run build",
         status: "inProgress",
@@ -121,6 +123,7 @@ describe("NotificationRouter", () => {
           type: "commandExecution",
           command: { host: "api.openai.com", protocol: "https" },
           status: "failed",
+          threadId: "thread-1",
         },
       },
     });
@@ -128,10 +131,56 @@ describe("NotificationRouter", () => {
     expect(publish).toHaveBeenCalledWith({
       type: "tool.status",
       payload: {
+        threadId: "thread-1",
         itemId: "item-cmd-2",
         tool: "command:https://api.openai.com",
         status: "failed",
       },
+    });
+  });
+
+  it("resolves threadId from turn cache for agent delta", () => {
+    const rpc = new EventEmitter();
+    const publish = vi.fn();
+
+    const router = new NotificationRouter(
+      rpc as any,
+      { publish } as any,
+      createLoggerStub(),
+    );
+
+    router.start();
+
+    rpc.emit("notification", {
+      method: "turn/started",
+      params: {
+        turn: {
+          id: "turn-1",
+          threadId: "thread-1",
+        },
+      },
+    });
+
+    rpc.emit("notification", {
+      method: "item/started",
+      params: {
+        item: {
+          id: "item-1",
+          type: "mcpToolCall",
+          tool: "search",
+          turnId: "turn-1",
+        },
+      },
+    });
+
+    rpc.emit("notification", {
+      method: "item/agentMessage/delta",
+      params: { itemId: "item-1", delta: "hello" },
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: "agent.delta",
+      payload: { threadId: "thread-1", itemId: "item-1", text: "hello" },
     });
   });
 });

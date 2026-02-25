@@ -88,7 +88,14 @@ export function LogPanel({ entries, logsEnabled, onToggleLogs, onClearLogs }: Lo
           Logs are paused. Turn On to resume capture.
         </div>
       ) : (
-        <div ref={scrollRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+        <div
+          ref={scrollRef}
+          className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+          aria-label="Runtime logs"
+        >
           {entries.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[var(--border)] bg-[var(--panel-strong)]/40 px-3 py-3 text-xs text-[var(--muted-foreground)]">
               Waiting for runtime events...
